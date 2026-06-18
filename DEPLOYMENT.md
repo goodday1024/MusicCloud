@@ -14,6 +14,7 @@ Set these in Vercel Project Settings:
 - `OPENAI_TTS_MODEL`
 - `OPENAI_TTS_VOICE`
 - `MUSIC_API_BASE_URL`
+- `NETEASE_API_BASE_URL`
 - `MUSIC_API_DEFAULT_PLATFORM=netease`
 - `MUSIC_API_PLATFORMS=netease`
 
@@ -26,6 +27,14 @@ Create a Vercel Blob store for the project. Without Blob, generated podcast file
 - `NETEASE_COOKIE`
 
 Paste a valid NetEase Cloud Music cookie if you want stable playlist access on Vercel. QR/phone login can still work, but serverless file state is temporary.
+
+For QR login, set:
+
+```text
+NETEASE_API_BASE_URL=https://api-enhanced-ten-dusky.vercel.app
+```
+
+Agentio will then use the same `/login/qr/key`, `/login/qr/create?platform=web&ua=pc`, and `/login/qr/check?ua=pc` flow as the working test page, which is less likely to trigger NetEase's device-risk prompt than the raw SDK fallback.
 
 ## Not Supported On Vercel
 

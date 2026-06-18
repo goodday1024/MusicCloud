@@ -175,6 +175,36 @@ function extractQrImage(qrimg) {
   return `data:image/png;base64,${String(qrimg)}`;
 }
 
+function neteaseProxyBase() {
+  return (neteaseApiBaseUrl || musicApiBaseUrl || "").replace(/\/$/, "");
+}
+
+function normalizeCookieList(cookie) {
+  if (!cookie) return [];
+  if (Array.isArray(cookie)) return cookie.map((item) => String(item).split(";")[0]?.trim()).filter(Boolean);
+  return String(cookie)
+    .split(/;|,(?=[^;]+?=)/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+async function fetchNeteaseProxy(pathname, { method = "GET", body } = {}) {
+  const base = neteaseProxyBase();
+  if (!base) return null;
+  const url = new URL(pathname, `${base}/`);
+  url.searchParams.set("timestamp", Date.now());
+  url.searchParams.set("ua", "pc");
+  const response = await fetch(url, {
+    method,
+    headers: method === "POST" ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const text = await response.text();
+  const payload = text ? JSON.parse(text) : {};
+  if (!response.ok) throw new Error(payload?.message || payload?.msg || `网易云代理接口失败：${response.status}`);
+  return payload;
+}
+
 async function refreshNeteaseProfile() {
   const state = await readNeteaseState();
   if (!state.cookies?.length) return null;
@@ -197,6 +227,33 @@ async function refreshNeteaseProfile() {
 }
 
 async function startNeteaseLogin() {
+  const proxyBase = neteaseProxyBase();
+  if (proxyBase) {
+    try {
+      const keyPayload = await fetchNeteaseProxy("/login/qr/key");
+      const key = keyPayload?.data?.unikey || keyPayload?.data?.data?.unikey || "";
+      if (key) {
+        const createPayload = await fetchNeteaseProxy(`/login/qr/create?key=${encodeURIComponent(key)}&platform=web&qrimg=true`);
+        const createData = createPayload?.data || {};
+        const state = await readNeteaseState();
+        const nextState = {
+          ...state,
+          qrKey: key,
+          qrImg: extractQrImage(createData.qrimg || ""),
+          qrUrl: createData.qrurl || `https://music.163.com/login?codekey=${key}`,
+          qrProvider: proxyBase,
+          qrStatus: "",
+          loggedIn: false,
+          updatedAt: new Date().toISOString()
+        };
+        await saveNeteaseState(nextState);
+        return nextState;
+      }
+    } catch (error) {
+      console.warn("proxy qr login start failed, falling back:", error.message);
+    }
+  }
+
   const keyResponse = await neteaseApi.login_qr_key({});
   const key = keyResponse?.body?.data?.data?.unikey || keyResponse?.body?.data?.unikey || keyResponse?.body?.unikey || "";
   if (!key) {
@@ -213,6 +270,7 @@ async function startNeteaseLogin() {
     qrKey: key,
     qrImg: extractQrImage(qrImg),
     qrUrl,
+    qrStatus: "",
     loggedIn: false,
     updatedAt: new Date().toISOString()
   };
@@ -279,6 +337,29 @@ async function checkNeteaseLogin(key) {
   const state = await readNeteaseState();
   const qrKey = key || state.qrKey;
   if (!qrKey) throw new Error("没有可用的登录 key");
+
+  const proxyBase = state.qrProvider || neteaseProxyBase();
+  if (proxyBase) {
+    try {
+      const payload = await fetchNeteaseProxy(`/login/qr/check?key=${encodeURIComponent(qrKey)}`);
+      const code = payload?.code ?? payload?.data?.code ?? 0;
+      const cookie = normalizeCookieList(payload?.cookie || payload?.data?.cookie || "");
+      const status = {
+        ...state,
+        qrKey,
+        cookies: cookie.length ? cookie : state.cookies || [],
+        loggedIn: code === 803 || code === 200,
+        qrStatus: payload?.message || payload?.msg || payload?.data?.message || "",
+        updatedAt: new Date().toISOString()
+      };
+      await saveNeteaseState(status);
+      if (status.loggedIn) await refreshNeteaseProfile().catch(() => null);
+      return { ...status, code, payload };
+    } catch (error) {
+      console.warn("proxy qr login check failed, falling back:", error.message);
+    }
+  }
+
   const response = await neteaseApi.login_qr_check({ key: qrKey, cookie: cookieHeaderFromState(state) });
   const payload = response?.body?.data || response?.body || {};
   const code = payload?.code ?? response?.code ?? 0;
@@ -290,14 +371,9 @@ async function checkNeteaseLogin(key) {
     updatedAt: new Date().toISOString()
   };
   if (code === 803 || code === 200) {
-    const cookie = response?.cookie || payload?.cookie || [];
+    const cookie = normalizeCookieList(response?.cookie || payload?.cookie || []);
     if (cookie?.length) {
-      status.cookies = Array.isArray(cookie)
-        ? cookie
-        : String(cookie)
-            .split(";")
-            .map((item) => item.trim())
-            .filter(Boolean);
+      status.cookies = cookie;
     }
     await saveNeteaseState(status);
     await refreshNeteaseProfile().catch(() => null);
