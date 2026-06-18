@@ -205,6 +205,11 @@ async function fetchNeteaseProxy(pathname, { method = "GET", body } = {}) {
   return payload;
 }
 
+function isRiskPayload(payload) {
+  const text = JSON.stringify(payload || {});
+  return /风险|risk|设备|环境|验证失败|security/i.test(text);
+}
+
 async function refreshNeteaseProfile() {
   const state = await readNeteaseState();
   if (!state.cookies?.length) return null;
@@ -282,6 +287,25 @@ async function sendNeteaseCaptcha(phone, countrycode = "86") {
   const normalizedPhone = String(phone || "").replace(/[^\d]/g, "");
   const normalizedCountry = String(countrycode || "86").replace(/[^\d]/g, "") || "86";
   if (!normalizedPhone) throw new Error("请先输入手机号码");
+
+  if (neteaseProxyBase()) {
+    try {
+      const payload = await fetchNeteaseProxy(
+        `/captcha/sent?phone=${encodeURIComponent(normalizedPhone)}&ctcode=${encodeURIComponent(normalizedCountry)}&countrycode=${encodeURIComponent(normalizedCountry)}`
+      );
+      const code = payload?.code ?? payload?.data?.code ?? 500;
+      return {
+        ok: code === 200,
+        code,
+        payload,
+        provider: "proxy",
+        risk: isRiskPayload(payload)
+      };
+    } catch (error) {
+      console.warn("proxy captcha send failed, falling back:", error.message);
+    }
+  }
+
   const response = await neteaseApi.captcha_sent({ phone: normalizedPhone, ctcode: normalizedCountry }).catch((error) => ({ error }));
   const payload = response?.body?.data || response?.body || {};
   if (response?.error) throw new Error(response.error.message || "验证码发送失败");
@@ -298,6 +322,25 @@ async function verifyNeteaseCaptcha(phone, captcha, countrycode = "86") {
   const normalizedCountry = String(countrycode || "86").replace(/[^\d]/g, "") || "86";
   if (!normalizedPhone) throw new Error("请先输入手机号码");
   if (!normalizedCaptcha) throw new Error("请先输入验证码");
+
+  if (neteaseProxyBase()) {
+    try {
+      const payload = await fetchNeteaseProxy(
+        `/captcha/verify?phone=${encodeURIComponent(normalizedPhone)}&captcha=${encodeURIComponent(normalizedCaptcha)}&ctcode=${encodeURIComponent(normalizedCountry)}&countrycode=${encodeURIComponent(normalizedCountry)}`
+      );
+      const code = payload?.code ?? payload?.data?.code ?? 500;
+      return {
+        ok: code === 200,
+        code,
+        payload,
+        provider: "proxy",
+        risk: isRiskPayload(payload)
+      };
+    } catch (error) {
+      console.warn("proxy captcha verify failed, falling back:", error.message);
+    }
+  }
+
   const response = await neteaseApi.captcha_verify({ phone: normalizedPhone, captcha: normalizedCaptcha, ctcode: normalizedCountry }).catch((error) => ({ error }));
   const payload = response?.body?.data || response?.body || {};
   if (response?.error) throw new Error(response.error.message || "验证码校验失败");
@@ -314,6 +357,36 @@ async function loginNeteaseWithPhone({ phone, captcha, countrycode = "86" }) {
   const normalizedCountry = String(countrycode || "86").replace(/[^\d]/g, "") || "86";
   if (!normalizedPhone) throw new Error("请先输入手机号码");
   if (!normalizedCaptcha) throw new Error("请先输入验证码");
+
+  if (neteaseProxyBase()) {
+    try {
+      const payload = await fetchNeteaseProxy(
+        `/login/cellphone?phone=${encodeURIComponent(normalizedPhone)}&captcha=${encodeURIComponent(normalizedCaptcha)}&ctcode=${encodeURIComponent(normalizedCountry)}&countrycode=${encodeURIComponent(normalizedCountry)}`
+      );
+      const code = payload?.code ?? payload?.data?.code ?? 500;
+      const cookie = normalizeCookieList(payload?.cookie || payload?.data?.cookie || "");
+      const state = await readNeteaseState();
+      const nextState = {
+        ...state,
+        cookies: cookie.length ? cookie : state.cookies || [],
+        loggedIn: code === 200 && cookie.length > 0,
+        phoneLoginProvider: neteaseProxyBase(),
+        updatedAt: new Date().toISOString()
+      };
+      await saveNeteaseState(nextState);
+      if (nextState.loggedIn) await refreshNeteaseProfile().catch(() => null);
+      return {
+        ok: nextState.loggedIn,
+        code,
+        payload,
+        state: serializeNeteaseState(nextState),
+        risk: isRiskPayload(payload)
+      };
+    } catch (error) {
+      console.warn("proxy phone login failed, falling back:", error.message);
+    }
+  }
+
   const response = await neteaseApi.login_cellphone({
     phone: normalizedPhone,
     captcha: normalizedCaptcha,

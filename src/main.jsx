@@ -865,7 +865,10 @@ function App() {
         body: JSON.stringify({ phone, countrycode: "86" })
       });
       const data = await response.json();
-      if (!response.ok || data.ok === false) throw new Error(data.error || data.payload?.message || "验证码发送失败");
+      if (!response.ok || data.ok === false) {
+        const riskText = data.risk ? "网易云判定手机号云端登录存在风险，请优先使用扫码登录或在 Vercel 配置 NETEASE_COOKIE。" : "";
+        throw new Error(riskText || data.error || data.payload?.message || data.payload?.msg || "验证码发送失败");
+      }
       setLoginMessage("验证码已发送");
     } catch (error) {
       setLoginMessage(error.message || "验证码发送失败");
@@ -885,7 +888,10 @@ function App() {
         body: JSON.stringify({ phone, captcha, countrycode: "86" })
       });
       const data = await response.json();
-      if (!response.ok || data.ok === false) throw new Error(data.error || data.payload?.message || "手机号登录失败");
+      if (!response.ok || data.ok === false) {
+        const riskText = data.risk ? "网易云判定手机号云端登录存在风险，请优先使用扫码登录或在 Vercel 配置 NETEASE_COOKIE。" : "";
+        throw new Error(riskText || data.error || data.payload?.message || data.payload?.msg || "手机号登录失败");
+      }
       const nextState = data.state || (await refreshNeteaseState());
       setNeteaseState(nextState);
       setLoginOpen(false);
