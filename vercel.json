@@ -8,10 +8,7 @@
     "api/index.js": {
       "maxDuration": 60,
       "memory": 1024,
-      "includeFiles": [
-        "node_modules/@ffmpeg-installer/**",
-        "node_modules/@ffprobe-installer/**"
-      ]
+      "includeFiles": "node_modules/@{ffmpeg-installer,ffprobe-installer}/**"
     }
   },
   "rewrites": [
