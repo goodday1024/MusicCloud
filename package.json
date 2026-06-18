@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "dev": "concurrently \"node server/index.js\" \"vite --host 0.0.0.0\"",
     "server": "node server/index.js",
@@ -10,6 +13,9 @@
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@ffprobe-installer/ffprobe": "^2.1.2",
+    "@vercel/blob": "^2.4.1",
     "@vitejs/plugin-react": "^4.5.2",
     "concurrently": "^9.2.0",
     "cors": "^2.8.5",

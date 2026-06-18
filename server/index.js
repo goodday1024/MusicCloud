@@ -11,14 +11,21 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import OpenAI from "openai";
 import NeteaseCloudMusicApi from "NeteaseCloudMusicApi";
+import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import ffprobeInstaller from "@ffprobe-installer/ffprobe";
+import { put } from "@vercel/blob";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
-const uploadDir = path.join(__dirname, "uploads");
-const generatedDir = path.join(__dirname, "generated");
-const dataDir = path.join(__dirname, "data");
+const isVercel = Boolean(process.env.VERCEL);
+const runtimeDir = process.env.AGENTIO_RUNTIME_DIR || (isVercel ? "/tmp/agentio" : __dirname);
+const uploadDir = path.join(runtimeDir, "uploads");
+const generatedDir = path.join(runtimeDir, "generated");
+const dataDir = path.join(runtimeDir, "data");
 const memoryFile = path.join(dataDir, "memory.json");
+const ffmpegBin = process.env.FFMPEG_PATH || ffmpegInstaller.path || "ffmpeg";
+const ffprobeBin = process.env.FFPROBE_PATH || ffprobeInstaller.path || "ffprobe";
 const musicApiBaseUrl = process.env.MUSIC_API_BASE_URL?.replace(/\/$/, "") || "";
 const localMusicApiDir = process.env.LOCAL_MUSIC_API_DIR || "/Users/zhangzihang/music-api";
 const defaultMusicPlatform = process.env.MUSIC_API_DEFAULT_PLATFORM || "netease";
@@ -101,6 +108,13 @@ const defaultMemory = {
   sessions: []
 };
 
+function cookieListFromEnv(value) {
+  return String(value || "")
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 async function readMemory() {
   if (!existsSync(memoryFile)) return defaultMemory;
   try {
@@ -117,11 +131,24 @@ async function saveMemory(memory) {
 }
 
 async function readNeteaseState() {
+  const envCookies = cookieListFromEnv(process.env.NETEASE_COOKIE);
+  const envState = {
+    cookies: envCookies,
+    uid: "",
+    profile: null,
+    qrKey: "",
+    qrImg: "",
+    loggedIn: Boolean(envCookies.length)
+  };
   if (!existsSync(neteaseStateFile)) {
-    return { cookies: [], uid: "", profile: null, qrKey: "", qrImg: "", loggedIn: false };
+    return envState;
   }
   const raw = await readFile(neteaseStateFile, "utf8");
-  return JSON.parse(raw);
+  const state = JSON.parse(raw);
+  if (!state.cookies?.length && envCookies.length) {
+    return { ...state, cookies: envCookies, loggedIn: true };
+  }
+  return state;
 }
 
 async function saveNeteaseState(state) {
@@ -690,7 +717,8 @@ async function createTrackPodcastEpisode({ track, prompt, voice, memory, cookie,
     throw new Error(`无法为 ${safeTrack.title} 准备背景音乐`);
   }
   const voicePath = await createSpeech(podcastScript.script, voice);
-  const { outputName } = await mixPodcast({ musicPath, voicePath });
+  const { outputPath, outputName } = await mixPodcast({ musicPath, voicePath });
+  const outputUrl = await publishGeneratedFile(outputPath, outputName);
   const transcriptSegments = buildTranscriptSegments(podcastScript.script, Number(podcastScript.durationSeconds || safeTrack.duration || 30));
   const lyricSegments = await fetchLyrics({ id: safeTrack.id, platform: safeTrack.platform }).catch(() => []);
   return {
@@ -698,8 +726,8 @@ async function createTrackPodcastEpisode({ track, prompt, voice, memory, cookie,
     ...songPackage,
     podcastScript,
     musicUrl,
-    podcastAudioUrl: `/media/${outputName}`,
-    outputUrl: `/media/${outputName}`,
+    podcastAudioUrl: outputUrl,
+    outputUrl,
     transcriptSegments,
     lyricSegments
   };
@@ -1126,7 +1154,7 @@ async function runLocalMusicScript(platform, params) {
 async function probeRemoteDuration(url) {
   if (!url) return 0;
   try {
-    const { stdout } = await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", url], { timeout: 15000 });
+    const { stdout } = await execFileAsync(ffprobeBin, ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", url], { timeout: 15000 });
     const trimmed = String(stdout || "").trim();
     const num = Number.parseFloat(trimmed || "0");
     return Number.isFinite(num) ? num : 0;
@@ -1612,7 +1640,7 @@ async function createSpeech(script, voice) {
     .join("\n");
 
   async function createSilentFallback() {
-    await execFileAsync("ffmpeg", [
+    await execFileAsync(ffmpegBin, [
       "-y",
       "-f",
       "lavfi",
@@ -1660,7 +1688,7 @@ async function createSpeech(script, voice) {
       }
       const buffer = Buffer.from(await response.arrayBuffer());
       await writeFile(outputPath, buffer);
-      await execFileAsync("ffmpeg", ["-y", "-i", outputPath, "-filter:a", `atempo=${narrationTempo}`, spedPath]);
+      await execFileAsync(ffmpegBin, ["-y", "-i", outputPath, "-filter:a", `atempo=${narrationTempo}`, spedPath]);
       return spedPath;
     }
 
@@ -1670,7 +1698,7 @@ async function createSpeech(script, voice) {
     });
     const buffer = Buffer.from(await speech.arrayBuffer());
     await writeFile(outputPath, buffer);
-    await execFileAsync("ffmpeg", ["-y", "-i", outputPath, "-filter:a", `atempo=${narrationTempo}`, spedPath]);
+    await execFileAsync(ffmpegBin, ["-y", "-i", outputPath, "-filter:a", `atempo=${narrationTempo}`, spedPath]);
     return spedPath;
   } catch (error) {
     if (requestedVoice !== "alloy") {
@@ -1693,7 +1721,7 @@ async function createSpeech(script, voice) {
         if (response.ok) {
           const buffer = Buffer.from(await response.arrayBuffer());
           await writeFile(outputPath, buffer);
-          await execFileAsync("ffmpeg", ["-y", "-i", outputPath, "-filter:a", `atempo=${narrationTempo}`, spedPath]);
+          await execFileAsync(ffmpegBin, ["-y", "-i", outputPath, "-filter:a", `atempo=${narrationTempo}`, spedPath]);
           return spedPath;
         }
         console.warn("TTS alloy retry failed:", response.status, (await response.text().catch(() => "")).slice(0, 160));
@@ -1703,14 +1731,14 @@ async function createSpeech(script, voice) {
     }
     console.warn("TTS failed, using local fallback:", error.message);
     const fallback = await createSilentFallback();
-    await execFileAsync("ffmpeg", ["-y", "-i", fallback, "-filter:a", `atempo=${narrationTempo}`, spedPath]).catch(() => {});
+    await execFileAsync(ffmpegBin, ["-y", "-i", fallback, "-filter:a", `atempo=${narrationTempo}`, spedPath]).catch(() => {});
     return spedPath;
   }
 }
 
 async function createFallbackMusic() {
   const outputPath = path.join(generatedDir, `ambient-${nanoid(8)}.mp3`);
-  await execFileAsync("ffmpeg", [
+  await execFileAsync(ffmpegBin, [
     "-y",
     "-f",
     "lavfi",
@@ -1739,14 +1767,14 @@ async function prepareMusicInput(musicUrl) {
   const buffer = Buffer.from(await response.arrayBuffer());
   if (buffer.length < 32_000) throw new Error(`Music download too small: ${buffer.length} bytes`);
   await writeFile(outputPath, buffer);
-  await execFileAsync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1", outputPath]);
+  await execFileAsync(ffprobeBin, ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1", outputPath]);
   return outputPath;
 }
 
 async function mixPodcast({ musicPath, voicePath }) {
   const outputName = `podcast-${nanoid(10)}.mp3`;
   const outputPath = path.join(generatedDir, outputName);
-  await execFileAsync("ffmpeg", [
+  await execFileAsync(ffmpegBin, [
     "-y",
     "-i",
     musicPath,
@@ -1763,11 +1791,24 @@ async function mixPodcast({ musicPath, voicePath }) {
   return { outputPath, outputName };
 }
 
+async function publishGeneratedFile(filePath, fileName) {
+  if (process.env.BLOB_READ_WRITE_TOKEN) {
+    const buffer = await readFile(filePath);
+    const blob = await put(`agentio/${fileName}`, buffer, {
+      access: "public",
+      contentType: "audio/mpeg",
+      addRandomSuffix: true
+    });
+    return blob.url;
+  }
+  return `/media/${fileName}`;
+}
+
 function mergeUnique(a = [], b = []) {
   return [...new Set([...a, ...b].filter(Boolean))].slice(-12);
 }
 
-async function updateMemory({ prompt, brief, outputName }) {
+async function updateMemory({ prompt, brief, outputUrl }) {
   const memory = await readMemory();
   const patch = brief.memoryPatch || {};
   memory.profile.favoriteScenes = mergeUnique(memory.profile.favoriteScenes, patch.favoriteScenes);
@@ -1781,7 +1822,7 @@ async function updateMemory({ prompt, brief, outputName }) {
     title: brief.title,
     episodeTitle: brief.episodeTitle,
     script: brief.script,
-    outputUrl: `/media/${outputName}`
+    outputUrl
   });
   memory.sessions = memory.sessions.slice(0, 30);
   await saveMemory(memory);
@@ -2200,7 +2241,8 @@ app.post("/api/agent/create", upload.single("track"), async (req, res, next) => 
       trackNotes
     };
     const finalEpisode = currentEpisode || {};
-    const outputName = finalEpisode.podcastAudioUrl ? path.basename(finalEpisode.podcastAudioUrl) : `podcast-${nanoid(10)}.mp3`;
+    const outputUrl = finalEpisode.podcastAudioUrl || finalEpisode.outputUrl || "";
+    const outputName = outputUrl ? path.basename(new URL(outputUrl, "http://agentio.local").pathname) : `podcast-${nanoid(10)}.mp3`;
     const transcriptSegments = finalEpisode.transcriptSegments || buildTranscriptSegments(brief.script, Number(brief.durationSeconds || 30));
     const lyricSegments = await fetchLyrics({ id: backgroundMusic.id, platform: backgroundMusic.platform }).catch(() => []);
     const queueItems = selectedTrackList.map((track) => {
@@ -2232,13 +2274,13 @@ app.post("/api/agent/create", upload.single("track"), async (req, res, next) => 
     const updatedMemory = await updateMemory({
       prompt,
       brief,
-      outputName
+      outputUrl
     });
 
     res.json({
       ...brief,
-      outputUrl: `/media/${outputName}`,
-      podcastAudioUrl: `/media/${outputName}`,
+      outputUrl,
+      podcastAudioUrl: outputUrl,
       episodeScript: finalEpisode.podcastScript?.script || brief.script || "",
       sourceMusic: backgroundMusic,
       usedFallbackMusic,
@@ -2404,7 +2446,11 @@ app.use((error, _req, res, _next) => {
   res.status(500).json({ error: error.message || "Unknown server error" });
 });
 
-const port = Number(process.env.PORT || 8787);
-app.listen(port, () => {
-  console.log(`Agentio API listening on http://localhost:${port}`);
-});
+if (!isVercel) {
+  const port = Number(process.env.PORT || 8787);
+  app.listen(port, () => {
+    console.log(`Agentio API listening on http://localhost:${port}`);
+  });
+}
+
+export default app;
