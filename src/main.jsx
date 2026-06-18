@@ -665,10 +665,10 @@ function App() {
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "二维码状态检查失败");
         if (data.loggedIn || data.code === 803 || data.code === 200) {
-          const nextState = await refreshNeteaseState();
           setLoginMessage("登录成功，正在同步歌单");
           setLoginOpen(false);
-          setNeteaseState(nextState);
+          setNeteaseState(data);
+          await loadNeteaseLibrary().catch(() => null);
         } else if (data.qrStatus || data.payload?.message) {
           setLoginMessage(data.qrStatus || data.payload?.message);
         }

@@ -37,6 +37,7 @@ const neteaseApiBaseUrl = process.env.NETEASE_API_BASE_URL?.replace(/\/$/, "") |
 const neteaseStateFile = path.join(dataDir, "netease.json");
 const narrationLeadInSeconds = 0.18;
 const requestWindows = new Map();
+const browserCookieName = "agentio_netease_cookie";
 
 function clampInt(value, min, max, fallback = min) {
   const num = Number.parseInt(value, 10);
@@ -115,6 +116,39 @@ function cookieListFromEnv(value) {
     .filter(Boolean);
 }
 
+function parseRequestCookies(req) {
+  return Object.fromEntries(
+    String(req?.headers?.cookie || "")
+      .split(";")
+      .map((pair) => pair.trim())
+      .filter(Boolean)
+      .map((pair) => {
+        const index = pair.indexOf("=");
+        if (index === -1) return [pair, ""];
+        return [pair.slice(0, index), decodeURIComponent(pair.slice(index + 1))];
+      })
+  );
+}
+
+function cookieListFromRequest(req) {
+  return cookieListFromEnv(parseRequestCookies(req)[browserCookieName]);
+}
+
+function setBrowserNeteaseCookie(res, cookies = []) {
+  const value = normalizeCookieList(cookies).join("; ");
+  if (!value) return;
+  const secure = process.env.NODE_ENV === "production" || process.env.VERCEL ? "; Secure" : "";
+  res.setHeader(
+    "Set-Cookie",
+    `${browserCookieName}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000${secure}`
+  );
+}
+
+function clearBrowserNeteaseCookie(res) {
+  const secure = process.env.NODE_ENV === "production" || process.env.VERCEL ? "; Secure" : "";
+  res.setHeader("Set-Cookie", `${browserCookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`);
+}
+
 async function readMemory() {
   if (!existsSync(memoryFile)) return defaultMemory;
   try {
@@ -130,21 +164,26 @@ async function saveMemory(memory) {
   await writeFile(memoryFile, JSON.stringify(memory, null, 2), "utf8");
 }
 
-async function readNeteaseState() {
+async function readNeteaseState(req) {
   const envCookies = cookieListFromEnv(process.env.NETEASE_COOKIE);
+  const requestCookies = cookieListFromRequest(req);
+  const initialCookies = requestCookies.length ? requestCookies : envCookies;
   const envState = {
-    cookies: envCookies,
+    cookies: initialCookies,
     uid: "",
     profile: null,
     qrKey: "",
     qrImg: "",
-    loggedIn: Boolean(envCookies.length)
+    loggedIn: Boolean(initialCookies.length)
   };
   if (!existsSync(neteaseStateFile)) {
     return envState;
   }
   const raw = await readFile(neteaseStateFile, "utf8");
   const state = JSON.parse(raw);
+  if (requestCookies.length) {
+    return { ...state, cookies: requestCookies, loggedIn: true };
+  }
   if (!state.cookies?.length && envCookies.length) {
     return { ...state, cookies: envCookies, loggedIn: true };
   }
@@ -181,10 +220,18 @@ function neteaseProxyBase() {
 
 function normalizeCookieList(cookie) {
   if (!cookie) return [];
-  if (Array.isArray(cookie)) return cookie.map((item) => String(item).split(";")[0]?.trim()).filter(Boolean);
+  const ignoredCookieAttrs = new Set(["max-age", "expires", "path", "domain", "samesite", "secure", "httponly"]);
+  const normalizePart = (part) => {
+    const text = String(part || "").trim();
+    const first = text.split(";")[0]?.trim() || "";
+    const name = first.split("=")[0]?.trim().toLowerCase();
+    if (!first.includes("=") || ignoredCookieAttrs.has(name)) return "";
+    return first;
+  };
+  if (Array.isArray(cookie)) return cookie.map(normalizePart).filter(Boolean);
   return String(cookie)
-    .split(/;|,(?=[^;]+?=)/g)
-    .map((item) => item.trim())
+    .split(/,(?=[^;,]+=)|;/g)
+    .map(normalizePart)
     .filter(Boolean);
 }
 
@@ -210,16 +257,29 @@ function isRiskPayload(payload) {
   return /风险|risk|设备|环境|验证失败|security/i.test(text);
 }
 
-async function refreshNeteaseProfile() {
-  const state = await readNeteaseState();
+async function refreshNeteaseProfile(req) {
+  const state = await readNeteaseState(req);
   if (!state.cookies?.length) return null;
 
   const cookie = cookieHeaderFromState(state);
-  const accountResult = await neteaseApi.user_account({ cookie }).catch(() => null);
-  const account = accountResult?.body?.data || accountResult?.body || {};
-  const uid = account?.id || state.uid || "";
-  const detailResult = uid ? await neteaseApi.user_detail({ uid, cookie }).catch(() => null) : null;
-  const profile = detailResult?.body?.profile || detailResult?.body?.data || account?.profile || null;
+  let account = {};
+  let profile = null;
+  if (neteaseProxyBase()) {
+    const statusPayload = await fetchNeteaseProxy("/login/status", {
+      method: "POST",
+      body: { cookie }
+    }).catch(() => null);
+    account = statusPayload?.data?.account || statusPayload?.account || {};
+    profile = statusPayload?.data?.profile || statusPayload?.profile || null;
+  }
+  if (!profile && !account?.id) {
+    const accountResult = await neteaseApi.user_account({ cookie }).catch(() => null);
+    account = accountResult?.body?.data || accountResult?.body || {};
+    const uidForDetail = account?.id || account?.account?.id || state.uid || "";
+    const detailResult = uidForDetail ? await neteaseApi.user_detail({ uid: uidForDetail, cookie }).catch(() => null) : null;
+    profile = detailResult?.body?.profile || detailResult?.body?.data || account?.profile || null;
+  }
+  const uid = account?.id || account?.account?.id || profile?.userId || profile?.userIdStr || state.uid || "";
   const nextState = {
     ...state,
     uid,
@@ -374,12 +434,13 @@ async function loginNeteaseWithPhone({ phone, captcha, countrycode = "86" }) {
         updatedAt: new Date().toISOString()
       };
       await saveNeteaseState(nextState);
-      if (nextState.loggedIn) await refreshNeteaseProfile().catch(() => null);
+      const refreshed = nextState.loggedIn ? await refreshNeteaseProfile().catch(() => nextState) : nextState;
       return {
-        ok: nextState.loggedIn,
+        ok: refreshed.loggedIn,
         code,
         payload,
-        state: serializeNeteaseState(nextState),
+        state: serializeNeteaseState(refreshed),
+        cookies: refreshed.cookies || [],
         risk: isRiskPayload(payload)
       };
     } catch (error) {
@@ -397,13 +458,13 @@ async function loginNeteaseWithPhone({ phone, captcha, countrycode = "86" }) {
   const state = await readNeteaseState();
   const nextState = {
     ...state,
-    cookies: Array.isArray(cookie) ? cookie : String(cookie).split(";").map((item) => item.trim()).filter(Boolean),
+    cookies: normalizeCookieList(cookie),
     loggedIn: payload?.code === 200 || response?.status === 200,
     updatedAt: new Date().toISOString()
   };
   await saveNeteaseState(nextState);
-  await refreshNeteaseProfile().catch(() => null);
-  return { ok: nextState.loggedIn, payload, state: serializeNeteaseState(nextState) };
+  const refreshed = nextState.loggedIn ? await refreshNeteaseProfile().catch(() => nextState) : nextState;
+  return { ok: refreshed.loggedIn, payload, state: serializeNeteaseState(refreshed), cookies: refreshed.cookies || [] };
 }
 
 async function checkNeteaseLogin(key) {
@@ -426,8 +487,8 @@ async function checkNeteaseLogin(key) {
         updatedAt: new Date().toISOString()
       };
       await saveNeteaseState(status);
-      if (status.loggedIn) await refreshNeteaseProfile().catch(() => null);
-      return { ...status, code, payload };
+      const refreshed = status.loggedIn ? await refreshNeteaseProfile().catch(() => status) : status;
+      return { ...refreshed, code, payload };
     } catch (error) {
       console.warn("proxy qr login check failed, falling back:", error.message);
     }
@@ -449,7 +510,8 @@ async function checkNeteaseLogin(key) {
       status.cookies = cookie;
     }
     await saveNeteaseState(status);
-    await refreshNeteaseProfile().catch(() => null);
+    const refreshed = await refreshNeteaseProfile().catch(() => status);
+    return { ...refreshed, code, payload };
   } else {
     await saveNeteaseState(status);
   }
@@ -463,8 +525,8 @@ async function refreshNeteaseAccount() {
   return serializeNeteaseState(nextState || state);
 }
 
-async function fetchNeteasePlaylists() {
-  const state = await refreshNeteaseProfile().catch(() => null);
+async function fetchNeteasePlaylists(req) {
+  const state = await refreshNeteaseProfile(req).catch(() => null);
   const uid = state?.uid || state?.profile?.userId || state?.profile?.userIdStr || "";
   if (!uid) {
     throw new Error("尚未登录网易云，无法获取歌单");
@@ -481,9 +543,9 @@ async function fetchNeteasePlaylists() {
   return playlists.map(normalizePlaylistItem).filter((item) => item.id);
 }
 
-async function fetchNeteasePlaylistTracks(playlistId) {
+async function fetchNeteasePlaylistTracks(playlistId, req) {
   if (!playlistId) throw new Error("缺少歌单 ID");
-  const state = await readNeteaseState();
+  const state = await readNeteaseState(req);
   const cookie = cookieHeaderFromState(state);
   const response = await neteaseApi.playlist_track_all({
     id: playlistId,
@@ -2002,10 +2064,10 @@ app.get("/api/memory", async (_req, res, next) => {
   }
 });
 
-app.get("/api/netease/state", async (_req, res, next) => {
+app.get("/api/netease/state", async (req, res, next) => {
   try {
-    const state = await readNeteaseState();
-    res.json(serializeNeteaseState(state));
+    const state = await refreshNeteaseProfile(req).catch(() => readNeteaseState(req));
+    res.json(serializeNeteaseState(await state));
   } catch (error) {
     next(error);
   }
@@ -2023,6 +2085,7 @@ app.post("/api/netease/login/start", async (_req, res, next) => {
 app.post("/api/netease/login/check", async (req, res, next) => {
   try {
     const result = await checkNeteaseLogin(req.body?.key || req.query?.key);
+    if (result.cookies?.length) setBrowserNeteaseCookie(res, result.cookies);
     res.json(result);
   } catch (error) {
     next(error);
@@ -2058,15 +2121,17 @@ app.post("/api/netease/login/phone", async (req, res, next) => {
       captcha: String(req.body?.captcha || "").trim(),
       countrycode: String(req.body?.countrycode || "86").trim()
     });
+    if (result.cookies?.length) setBrowserNeteaseCookie(res, result.cookies);
     res.json(result);
   } catch (error) {
     next(error);
   }
 });
 
-app.get("/api/netease/account", async (_req, res, next) => {
+app.get("/api/netease/account", async (req, res, next) => {
   try {
-    res.json(await refreshNeteaseAccount());
+    const state = await refreshNeteaseProfile(req).catch(() => readNeteaseState(req));
+    res.json(serializeNeteaseState(await state));
   } catch (error) {
     next(error);
   }
@@ -2076,15 +2141,16 @@ app.post("/api/netease/logout", async (_req, res, next) => {
   try {
     const nextState = { cookies: [], uid: "", profile: null, qrKey: "", qrImg: "", loggedIn: false };
     await saveNeteaseState(nextState);
+    clearBrowserNeteaseCookie(res);
     res.json(serializeNeteaseState(nextState));
   } catch (error) {
     next(error);
   }
 });
 
-app.get("/api/netease/playlists", async (_req, res, next) => {
+app.get("/api/netease/playlists", async (req, res, next) => {
   try {
-    const items = await fetchNeteasePlaylists();
+    const items = await fetchNeteasePlaylists(req);
     res.json({ items });
   } catch (error) {
     next(error);
@@ -2093,19 +2159,19 @@ app.get("/api/netease/playlists", async (_req, res, next) => {
 
 app.get("/api/netease/playlist/:id/tracks", async (req, res, next) => {
   try {
-    const items = await fetchNeteasePlaylistTracks(req.params.id);
+    const items = await fetchNeteasePlaylistTracks(req.params.id, req);
     res.json({ items });
   } catch (error) {
     next(error);
   }
 });
 
-app.get("/api/netease/library/tracks", async (_req, res, next) => {
+app.get("/api/netease/library/tracks", async (req, res, next) => {
   try {
-    const playlists = await fetchNeteasePlaylists();
+    const playlists = await fetchNeteasePlaylists(req);
     const groups = await Promise.all(
       playlists.map(async (playlist) => {
-        const tracks = await fetchNeteasePlaylistTracks(playlist.id).catch(() => []);
+        const tracks = await fetchNeteasePlaylistTracks(playlist.id, req).catch(() => []);
         return tracks.map((track, index) => ({
           ...track,
           cover: track.cover || playlist.cover || "",
@@ -2122,7 +2188,11 @@ app.get("/api/netease/library/tracks", async (_req, res, next) => {
       items: groups.flat()
     });
   } catch (error) {
-    next(error);
+    res.status(200).json({
+      playlists: [],
+      items: [],
+      warning: error.message || "网易云曲库暂时没有载入"
+    });
   }
 });
 
