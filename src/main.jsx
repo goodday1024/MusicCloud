@@ -3,6 +3,9 @@ import { createRoot } from "react-dom/client";
 import * as THREE from "three";
 import "./styles.css";
 
+const BRAND_CN = "云韶";
+const BRAND_EN = "CaelumShao";
+
 function trackKey(track) {
   if (!track) return "";
   return String(track.libraryKey || track.id || track.podcastAudioUrl || track.musicUrl || `${track.title || ""}-${track.artist || ""}`);
@@ -14,7 +17,7 @@ function formatTime(seconds) {
 }
 
 function splitTitle(title) {
-  const chars = Array.from(String(title || "Agentio"));
+  const chars = Array.from(String(title || BRAND_CN));
   if (chars.length <= 10) return [chars.join("")];
   const midpoint = Math.ceil(chars.length / 2);
   return [chars.slice(0, midpoint).join(""), chars.slice(midpoint).join("")];
@@ -317,7 +320,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
         ? tracksRef.current
         : Array.from({ length: 220 }, (_, index) => ({
             title: "等待曲库",
-            artist: "Agentio",
+            artist: BRAND_CN,
             libraryKey: `placeholder-${index}`,
             placeholder: true
           }));
@@ -559,7 +562,7 @@ function App() {
   const [trackQueue, setTrackQueue] = useState([]);
   const [queueIndex, setQueueIndex] = useState(-1);
   const [playerSource, setPlayerSource] = useState("");
-  const [playerTitle, setPlayerTitle] = useState("Agentio");
+  const [playerTitle, setPlayerTitle] = useState(BRAND_CN);
   const [playerArtist, setPlayerArtist] = useState("click a golden song point");
   const [audioTime, setAudioTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
@@ -624,7 +627,7 @@ function App() {
   const progress = audioDuration ? Math.min(100, (audioTime / audioDuration) * 100) : 0;
   const displayTrack = panelOpen ? infoTrack || filteredTracks[0] || libraryTracks[0] || null : null;
   const playlistCount = new Set(libraryTracks.map((track) => track.playlistId).filter(Boolean)).size;
-  const titleLines = splitTitle(displayTrack?.title || "Agentio");
+  const titleLines = splitTitle(displayTrack?.title || BRAND_CN);
 
   async function refreshNeteaseState() {
     const response = await fetch("/api/netease/state");
@@ -770,7 +773,7 @@ function App() {
     queueIndexRef.current = index;
     setQueueIndex(index);
     setSelectedTrack(track);
-    setPlayerTitle(track.title || "Agentio");
+    setPlayerTitle(track.title || BRAND_CN);
     setPlayerArtist(track.artist || track.playlistName || "podcast mix");
     setMessage("正在生成播客混音");
 
@@ -803,7 +806,7 @@ function App() {
     setJumping(false);
     setSelectedTrack(track);
     setHoveredTrack(track);
-    setPlayerTitle(track.title || "Agentio");
+    setPlayerTitle(track.title || BRAND_CN);
     setPlayerArtist(track.artist || track.playlistName || "song point");
     queueRef.current = [track];
     setTrackQueue([track]);
@@ -960,7 +963,7 @@ function App() {
 
   async function shareTrack() {
     if (!displayTrack) return;
-    const text = `Agentio · ${displayTrack.title || "歌曲"} - ${displayTrack.artist || "未知艺人"}`;
+    const text = `${BRAND_CN} · ${displayTrack.title || "歌曲"} - ${displayTrack.artist || "未知艺人"}`;
     try {
       await navigator.clipboard?.writeText(text);
       flash("已复制分享文本");
@@ -972,7 +975,7 @@ function App() {
   function saveSnapshot() {
     if (!displayTrack) return;
     const payload = {
-      title: displayTrack.title || "Agentio",
+      title: displayTrack.title || BRAND_CN,
       artist: displayTrack.artist || "",
       album: displayTrack.album || "",
       playlist: displayTrack.playlistName || "",
@@ -1010,7 +1013,7 @@ function App() {
       {!uiHidden && (
       <header className="hud-top">
         <div className="title">
-          Agentio <span className="title-en">Music Cloud</span>
+          {BRAND_CN} <span className="title-en">{BRAND_EN}</span>
         </div>
         <div className="seg">
           {["歌星", "播客", "歌单", "封面", "年代"].map((mode) => (

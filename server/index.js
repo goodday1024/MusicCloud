@@ -571,7 +571,7 @@ async function buildPlaylistPodcastBrief({ prompt, playlist, tracks, memory }) {
   if (!process.env.OPENAI_API_KEY) {
     return {
       title: playlist.name || "网易云歌单",
-      artist: "Agentio",
+      artist: "云韶",
       episodeTitle: `${playlist.name || "歌单"} 的轻声导览`,
       scene: "歌单导览",
       durationSeconds: 60,
@@ -1295,7 +1295,7 @@ async function generatePodcastBrief({ prompt, trackTitle, memory }) {
             rememberedPreferences: memory.profile,
             schema: {
               title: "歌曲名，未知则起一个适合当前场景的名字",
-              artist: "艺术家，未知则为 Agentio",
+              artist: "艺术家，未知则为 云韶",
               episodeTitle: "播客片段标题，中文或英文均可",
               scene: "适合的场景标签",
               durationSeconds: "旁白建议长度，50 到 110 秒",
@@ -1317,7 +1317,7 @@ async function generatePodcastBrief({ prompt, trackTitle, memory }) {
     console.warn("generatePodcastBrief: OpenAI failed, falling back", err?.message || err);
     return {
       title: trackTitle || "Monday Night Exhale",
-      artist: "Agentio",
+      artist: "云韶",
       episodeTitle: "今晚的轻声引言",
       scene: "专注、放松、微弱背景音乐",
       durationSeconds: 84,
@@ -1424,7 +1424,7 @@ async function searchMusic({ keyword, platform, count = 10, page = 1 }) {
       {
         id: "demo-night-exhale",
         title: keyword || "Monday Night Exhale",
-      artist: "Agentio Demo",
+      artist: "云韶 Demo",
         album: "Local generated ambience",
         duration: 75,
         url: "",
@@ -2408,7 +2408,7 @@ app.post("/api/agent/create", upload.single("track"), async (req, res, next) => 
       musicUrl = backgroundMusic.musicUrl;
       trackTitle = backgroundMusic.trackTitle || brief.title;
     }
-    if (backgroundMusic.artist && (!brief.artist || brief.artist === "Agentio")) brief.artist = backgroundMusic.artist;
+    if (backgroundMusic.artist && (!brief.artist || brief.artist === "云韶")) brief.artist = backgroundMusic.artist;
 
     const firstTrack = selectedTrackList[0] || playlistTracks[0];
     if (firstTrack) {
@@ -2618,7 +2618,7 @@ app.post("/api/agent/intent", async (req, res, next) => {
         {
           role: "system",
           content:
-            "你是 Agentio 的语音界面意图分类器。用户必须先说 hey dj，前端会把后面的请求发给你。请只输出小写 json 对象。intent 只能是 login/music/lyrics/queue/logout/chat。panel 只能是 qr-login/phone-login/playlist/lyrics/queue/none。shouldStartQr 和 shouldCreatePodcast 是布尔值。音乐请求要保留 prompt。"
+            "你是 云韶 的语音界面意图分类器。用户必须先说 hey dj，前端会把后面的请求发给你。请只输出小写 json 对象。intent 只能是 login/music/lyrics/queue/logout/chat。panel 只能是 qr-login/phone-login/playlist/lyrics/queue/none。shouldStartQr 和 shouldCreatePodcast 是布尔值。音乐请求要保留 prompt。"
         },
         {
           role: "user",
@@ -2687,7 +2687,7 @@ app.post("/api/homepod/play", async (req, res, next) => {
       return;
     }
 
-    const input = req.body?.scene ? `场景：${req.body.scene}` : "Agentio scene";
+    const input = req.body?.scene ? `场景：${req.body.scene}` : "云韶 scene";
     await execFileAsync("shortcuts", ["run", process.env.HOMEPOD_SHORTCUT_NAME, "-i", input]);
     res.json({ ok: true, message: "已请求 HomePod 场景播放。" });
   } catch (error) {
@@ -2707,7 +2707,7 @@ app.use((error, _req, res, _next) => {
 if (!isVercel) {
   const port = Number(process.env.PORT || 8787);
   app.listen(port, () => {
-    console.log(`Agentio API listening on http://localhost:${port}`);
+    console.log(`云韶 API listening on http://localhost:${port}`);
   });
 }
 
