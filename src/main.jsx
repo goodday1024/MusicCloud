@@ -1183,7 +1183,7 @@ function App() {
       </footer>
       )}
 
-      {playerSource && <audio ref={audioRef} src={playerSource} preload="auto" crossOrigin="anonymous" />}
+      {playerSource && <audio ref={audioRef} src={playerSource} preload="auto" />}
     </main>
   );
 }

@@ -928,7 +928,7 @@ async function createTrackPodcastEpisode({ track, prompt, voice, memory, cookie,
     throw new Error(`无法为 ${safeTrack.title} 准备背景音乐`);
   }
   const voicePath = await createSpeech(podcastScript.script, voice);
-  const { outputPath, outputName } = await mixPodcast({ musicPath, voicePath });
+  const { outputPath, outputName, audioDiagnostics } = await mixPodcast({ musicPath, voicePath });
   const outputUrl = await publishGeneratedFile(outputPath, outputName);
   const transcriptSegments = buildTranscriptSegments(podcastScript.script, Number(podcastScript.durationSeconds || safeTrack.duration || 30));
   const lyricSegments = await fetchLyrics({ id: safeTrack.id, platform: safeTrack.platform }).catch(() => []);
@@ -939,6 +939,7 @@ async function createTrackPodcastEpisode({ track, prompt, voice, memory, cookie,
     musicUrl,
     podcastAudioUrl: outputUrl,
     outputUrl,
+    audioDiagnostics,
     transcriptSegments,
     lyricSegments
   };
@@ -1947,6 +1948,29 @@ async function createSpeech(script, voice) {
   }
 }
 
+async function measureAudioMeanVolume(filePath) {
+  try {
+    const { stderr } = await execFileAsync(
+      ffmpegBin,
+      ["-hide_banner", "-nostats", "-i", filePath, "-af", "volumedetect", "-f", "null", "-"],
+      { timeout: 20000, maxBuffer: 1024 * 1024 }
+    );
+    const match = String(stderr || "").match(/mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB/i);
+    const meanDb = match ? Number.parseFloat(match[1]) : Number.NEGATIVE_INFINITY;
+    return Number.isFinite(meanDb) ? meanDb : Number.NEGATIVE_INFINITY;
+  } catch (error) {
+    console.warn("measureAudioMeanVolume failed:", error.message);
+    return Number.NEGATIVE_INFINITY;
+  }
+}
+
+async function ensureAudibleAudio(filePath, label = "audio") {
+  const meanDb = await measureAudioMeanVolume(filePath);
+  if (meanDb > -48) return { filePath, meanDb, audible: true };
+  console.warn(`${label} is too quiet (${meanDb} dB), creating audible fallback`);
+  return { filePath: await createFallbackMusic(), meanDb, audible: false };
+}
+
 async function createFallbackMusic() {
   const outputPath = path.join(generatedDir, `ambient-${nanoid(8)}.mp3`);
   await execFileAsync(ffmpegBin, [
@@ -1985,21 +2009,36 @@ async function prepareMusicInput(musicUrl) {
 async function mixPodcast({ musicPath, voicePath }) {
   const outputName = `podcast-${nanoid(10)}.mp3`;
   const outputPath = path.join(generatedDir, outputName);
+  const musicCheck = await ensureAudibleAudio(musicPath, "music input");
+  const voiceCheck = await ensureAudibleAudio(voicePath, "voice input");
   await execFileAsync(ffmpegBin, [
     "-y",
     "-i",
-    musicPath,
+    musicCheck.filePath,
     "-i",
-    voicePath,
+    voiceCheck.filePath,
     "-filter_complex",
-    "[0:a]volume='if(between(t,0,9999),0.28,0.45)':eval=frame,afade=t=in:ss=0:d=0.6[music];[1:a]adelay=280|280,volume=4.4[narration];[music][narration]amix=inputs=2:duration=first:dropout_transition=0.1,alimiter=limit=0.92",
+    "[0:a]volume=0.58,afade=t=in:ss=0:d=0.6[music];[1:a]adelay=280|280,volume=5.2[narration];[music][narration]amix=inputs=2:duration=first:dropout_transition=0.1,alimiter=limit=0.94",
     "-c:a",
     "libmp3lame",
     "-q:a",
     "2",
     outputPath
   ]);
-  return { outputPath, outputName };
+  const outputCheck = await ensureAudibleAudio(outputPath, "podcast output");
+  if (outputCheck.filePath !== outputPath) {
+    await execFileAsync(ffmpegBin, ["-y", "-i", outputCheck.filePath, "-c:a", "libmp3lame", "-q:a", "2", outputPath]);
+  }
+  return {
+    outputPath,
+    outputName,
+    audioDiagnostics: {
+      musicMeanDb: musicCheck.meanDb,
+      voiceMeanDb: voiceCheck.meanDb,
+      outputMeanDb: outputCheck.meanDb,
+      usedFallback: !musicCheck.audible || !voiceCheck.audible || !outputCheck.audible
+    }
+  };
 }
 
 async function publishGeneratedFile(filePath, fileName) {
