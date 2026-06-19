@@ -10,6 +10,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import crypto from "node:crypto";
 import OpenAI from "openai";
 import NeteaseCloudMusicApi from "NeteaseCloudMusicApi";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
@@ -32,7 +33,17 @@ const ffmpegBin = process.env.FFMPEG_PATH || ffmpegInstaller.path || "ffmpeg";
 const ffprobeBin = process.env.FFPROBE_PATH || ffprobeInstaller.path || "ffprobe";
 const musicApiBaseUrl = process.env.MUSIC_API_BASE_URL?.replace(/\/$/, "") || "";
 const wpMusicApiBaseUrl = process.env.WP_MUSIC_API_BASE_URL?.replace(/\/$/, "") || "";
-const qqMusicApi1BaseUrl = process.env.QQMUSIC_API1_BASE_URL?.replace(/\/$/, "") || "";
+const qqMusicApi1BaseUrl = process.env.QQMUSIC_API1_BASE_URL?.replace(/\/$/, "") || "http://49.51.189.172:8000";
+const qqMusicCharlesMusicdlFallbackEnabled = !/^(0|false|no)$/i.test(process.env.QQMUSIC_CHARLES_MUSICDL_FALLBACK || "true");
+const qqMusicCharlesMusicdlFallbackApis = (process.env.QQMUSIC_CHARLES_MUSICDL_APIS || "nki,tang,xunhuisi,lpz,lxmusic,vkeys")
+  .split(",")
+  .map((item) => item.trim().toLowerCase())
+  .filter(Boolean);
+const qqMusicThirdPartyKeys = {
+  nki: (process.env.QQMUSIC_NKI_API_KEYS || "").split(",").map((item) => item.trim()).filter(Boolean),
+  xianyuw: (process.env.QQMUSIC_XIANYUW_API_KEYS || "").split(",").map((item) => item.trim()).filter(Boolean),
+  cy: (process.env.QQMUSIC_CY_API_KEYS || "").split(",").map((item) => item.trim()).filter(Boolean)
+};
 const localMusicApiDir = process.env.LOCAL_MUSIC_API_DIR || "/Users/zhangzihang/music-api";
 const defaultMusicPlatform = process.env.MUSIC_API_DEFAULT_PLATFORM || "netease";
 const musicPlatforms = (process.env.MUSIC_API_PLATFORMS || "kugou,qq,netease,kuwo")
@@ -316,6 +327,29 @@ async function qqMusicApiCall(pathname, query = {}, stateOrReq) {
   const state = Array.isArray(stateOrReq?.cookies) ? stateOrReq : await readQQMusicState(stateOrReq);
   setQQMusicApiCookie(state.cookies || []);
   return qqMusicApi.api(pathname, query);
+}
+
+async function fetchQQJson(urlString, params = {}, state = {}) {
+  const url = new URL(urlString);
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
+  });
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json, text/plain, */*",
+      Referer: "https://y.qq.com/portal/profile.html",
+      "User-Agent": "Mozilla/5.0 AppleWebKit/537.36 Chrome/124 Safari/537.36",
+      Cookie: cookieHeaderFromState(state)
+    }
+  });
+  if (!response.ok) throw new Error(`QQ 音乐接口失败：${response.status}`);
+  const text = await response.text();
+  const jsonText = text.trim().replace(/^callback\(|^MusicJsonCallback\(|^jsonCallback\(|\)$/g, "");
+  try {
+    return jsonText ? JSON.parse(jsonText) : {};
+  } catch (_error) {
+    throw new Error("QQ 音乐接口返回无法解析");
+  }
 }
 
 function parseSetCookies(headers) {
@@ -898,13 +932,151 @@ async function checkQQMusicQrLogin(qrSig) {
   };
 }
 
+function qqMusicApi1CredentialFromState(state = {}) {
+  if (state?.api1Credential?.musicid && state?.api1Credential?.musickey) return state.api1Credential;
+  const cookieObject = cookieObjectFromList(state.cookies || []);
+  const credential = normalizeQQMusicApi1Credential({
+    ...cookieObject,
+    musicid: cookieObject.musicid || state.uin || cookieObject.uin,
+    musickey: cookieObject.musickey || cookieObject.qm_keyst || cookieObject.qqmusic_key
+  });
+  return credential.musicid && credential.musickey ? credential : null;
+}
+
+function qqMusicEncryptedUinFromState(state = {}) {
+  return (
+    state?.profile?.creator?.encrypt_uin ||
+    state?.profile?.encrypt_uin ||
+    state?.profile?.data?.encrypt_uin ||
+    state?.profile?.data?.creator?.encrypt_uin ||
+    state?.encrypt_uin ||
+    ""
+  );
+}
+
+async function fetchQQMusicApi1CreatedPlaylists(uin, state) {
+  const credential = qqMusicApi1CredentialFromState(state);
+  if (!credential || !uin) return [];
+  const payload = await fetchQQMusicApi1(`/user/${encodeURIComponent(uin)}/created_songlists`, { credential });
+  return Array.isArray(payload?.playlists) ? payload.playlists : [];
+}
+
+async function fetchQQMusicApi1FavPlaylists(euin, state) {
+  const credential = qqMusicApi1CredentialFromState(state);
+  if (!credential || !euin) return [];
+  const payload = await fetchQQMusicApi1(`/user/${encodeURIComponent(euin)}/fav/songlists`, {
+    params: { page: 1, num: 100 },
+    credential
+  });
+  return Array.isArray(payload?.playlists) ? payload.playlists : [];
+}
+
+async function fetchQQMusicApi1FavSongs(euin, state) {
+  const credential = qqMusicApi1CredentialFromState(state);
+  if (!credential || !euin) return [];
+  const payload = await fetchQQMusicApi1(`/user/${encodeURIComponent(euin)}/fav/songs`, {
+    params: { page: 1, num: 1000 },
+    credential
+  });
+  const tracks = payload?.songlist || payload?.songs || payload?.list || [];
+  return Array.isArray(tracks) ? tracks : [];
+}
+
+async function fetchQQMusicApi1PlaylistDetail(playlistId, state, dirid = 0) {
+  if (!playlistId) return {};
+  const credential = qqMusicApi1CredentialFromState(state);
+  const payload = await fetchQQMusicApi1(`/songlist/${encodeURIComponent(playlistId)}/detail`, {
+    params: { dirid: dirid || 0, num: 1000, page: 1, onlysong: false, tag: true, userinfo: true },
+    credential
+  });
+  return payload || {};
+}
+
+async function fetchQQMusicCreatedPlaylists(uin, state) {
+  const api1Items = await fetchQQMusicApi1CreatedPlaylists(uin, state).catch((error) => {
+    console.warn("QQMusicApi1 created playlists failed:", error.message);
+    return [];
+  });
+  if (api1Items.length) return api1Items;
+  const payload = await fetchQQJson("https://c.y.qq.com/rsc/fcgi-bin/fcg_user_created_diss", {
+    hostUin: 0,
+    hostuin: uin,
+    sin: 0,
+    size: 200,
+    g_tk: 5381,
+    loginUin: uin || 0,
+    format: "json",
+    inCharset: "utf8",
+    outCharset: "utf-8",
+    notice: 0,
+    platform: "yqq.json",
+    needNewCode: 0
+  }, state);
+  if (payload?.code === 4000) return [];
+  const list = payload?.data?.disslist || payload?.disslist || [];
+  return Array.isArray(list) ? list : [];
+}
+
+async function fetchQQMusicCollectedPlaylists(uin, state) {
+  const euin = qqMusicEncryptedUinFromState(state);
+  const api1Items = await fetchQQMusicApi1FavPlaylists(euin, state).catch((error) => {
+    console.warn("QQMusicApi1 fav playlists failed:", error.message);
+    return [];
+  });
+  if (api1Items.length) return api1Items;
+  const payload = await fetchQQJson("https://c.y.qq.com/fav/fcgi-bin/fcg_get_profile_order_asset.fcg", {
+    ct: 20,
+    cid: 205360956,
+    userid: uin,
+    reqtype: 3,
+    sin: 0,
+    ein: 80,
+    g_tk: 5381,
+    loginUin: uin || 0,
+    format: "json",
+    inCharset: "utf8",
+    outCharset: "utf-8",
+    platform: "yqq.json",
+    needNewCode: 0
+  }, state);
+  const list = payload?.data?.cdlist || payload?.cdlist || [];
+  return Array.isArray(list) ? list : [];
+}
+
 async function fetchQQMusicPlaylists(req) {
   const state = await refreshQQMusicProfile(req).catch(() => readQQMusicState(req));
   const uin = state?.uin || "";
   if (!uin) throw new Error("尚未登录 QQ 音乐，无法获取歌单");
-  const created = await qqMusicApiCall("user/songlist", { id: uin }, state).catch(() => ({ list: [] }));
-  const collected = await qqMusicApiCall("user/collect/songlist", { id: uin, pageNo: 1, pageSize: 80 }, state).catch(() => ({ list: [] }));
-  const merged = [...(created?.list || []), ...(collected?.list || [])];
+  const euin = qqMusicEncryptedUinFromState(state);
+  const [created, collected] = await Promise.all([
+    fetchQQMusicCreatedPlaylists(uin, state).catch((error) => {
+      console.warn("QQ created playlists failed:", error.message);
+      return [];
+    }),
+    fetchQQMusicCollectedPlaylists(uin, state).catch((error) => {
+      console.warn("QQ collected playlists failed:", error.message);
+      return [];
+    })
+  ]);
+  let merged = [...created, ...collected];
+  if (!merged.length) {
+    const fallbackCollected = await qqMusicApiCall("user/collect/songlist", { id: uin, pageNo: 1, pageSize: 80 }, state)
+      .then((result) => result?.list || [])
+      .catch(() => []);
+    merged = fallbackCollected;
+  }
+  if (euin) {
+    merged.unshift({
+      id: `fav:${euin}`,
+      dirid: 201,
+      title: "我喜欢",
+      diss_name: "我喜欢",
+      desc: "QQ 音乐收藏歌曲",
+      picurl: "https://y.gtimg.cn/mediastyle/global/img/cover_like.png",
+      songnum: 0,
+      platform: "qq"
+    });
+  }
   const seen = new Set();
   return merged
     .map(normalizeQQMusicPlaylistItem)
@@ -915,10 +1087,44 @@ async function fetchQQMusicPlaylists(req) {
     });
 }
 
+async function fetchQQMusicPlaylistDetail(playlistId, state) {
+  const api1Detail = await fetchQQMusicApi1PlaylistDetail(playlistId, state).catch((error) => {
+    console.warn("QQMusicApi1 playlist detail failed:", error.message);
+    return null;
+  });
+  if (api1Detail?.songlist?.length || api1Detail?.dirinfo) return api1Detail;
+  const payload = await fetchQQJson("https://c.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg", {
+    type: 1,
+    utf8: 1,
+    disstid: playlistId,
+    loginUin: state?.uin || 0,
+    g_tk: 5381,
+    format: "json",
+    inCharset: "utf8",
+    outCharset: "utf-8",
+    platform: "yqq.json",
+    needNewCode: 0
+  }, state);
+  const detail = payload?.cdlist?.[0] || payload?.data?.cdlist?.[0] || payload?.data || {};
+  if (!detail || Array.isArray(detail)) return {};
+  return detail;
+}
+
 async function fetchQQMusicPlaylistTracks(playlistId, req) {
   if (!playlistId) throw new Error("缺少 QQ 音乐歌单 ID");
   const state = await readQQMusicState(req);
-  const detail = await qqMusicApiCall("songlist", { id: playlistId }, state);
+  if (String(playlistId).startsWith("fav:")) {
+    const euin = String(playlistId).slice(4) || qqMusicEncryptedUinFromState(state);
+    const tracks = await fetchQQMusicApi1FavSongs(euin, state).catch((error) => {
+      console.warn("QQMusicApi1 fav songs failed:", error.message);
+      return [];
+    });
+    return tracks.map(normalizeQQMusicTrackItem).filter((item) => item.id);
+  }
+  const detail = await fetchQQMusicPlaylistDetail(playlistId, state).catch((error) => {
+    console.warn("QQ playlist detail failed:", error.message);
+    return {};
+  });
   const tracks = detail?.songlist || detail?.songList || detail?.songs || detail?.list || [];
   return (Array.isArray(tracks) ? tracks : []).map(normalizeQQMusicTrackItem).filter((item) => item.id);
 }
@@ -1273,9 +1479,12 @@ async function createTrackPodcastEpisode({ track, prompt, voice, memory, cookie,
     artist: track?.artist || "",
     duration: Number(track?.duration || 0) || 0,
     album: track?.album || "",
-    platform: track?.platform || "netease",
+    platform: inferMusicPlatform(track, "netease"),
     musicUrl: track?.musicUrl || track?.url || "",
-    playlistName: track?.playlistName || ""
+    mediaId: track?.mediaId || track?.media_mid || track?.raw?.strMediaMid || track?.raw?.media_mid || "",
+    qqSearchKey: track?.qqSearchKey || track?.raw?.qqSearchKey || "",
+    playlistName: track?.playlistName || "",
+    raw: track?.raw || null
   };
   const songPackage = await buildSongPodcastPackage(safeTrack, cookie);
   const podcastScript = await buildSongPodcastScript({
@@ -1287,11 +1496,32 @@ async function createTrackPodcastEpisode({ track, prompt, voice, memory, cookie,
   const musicUrl = await resolveMusicUrl({
     id: safeTrack.id,
     url: safeTrack.musicUrl,
-    platform: safeTrack.platform || "netease"
-  }).catch(() => safeTrack.musicUrl || "");
-  const musicPath = existingMusicPath || (musicUrl ? await prepareMusicInput(musicUrl).catch(() => "") : "");
+    platform: safeTrack.platform || "netease",
+    mediaId: safeTrack.mediaId,
+    keyword: safeTrack.qqSearchKey || safeTrack.raw?.qqSearchKey || `${safeTrack.title || ""} ${safeTrack.artist || ""}`.trim()
+  }).catch((error) => {
+    console.warn(`resolve track music failed for ${safeTrack.title}:`, error.message);
+    return "";
+  });
+  console.log("track music resolved", {
+    title: safeTrack.title,
+    platform: safeTrack.platform,
+    id: safeTrack.id,
+    keyword: safeTrack.qqSearchKey || `${safeTrack.title || ""} ${safeTrack.artist || ""}`.trim(),
+    hasMusicUrl: Boolean(musicUrl)
+  });
+  let usedFallbackMusic = false;
+  let musicPath = existingMusicPath;
+  if (!musicPath && musicUrl) {
+    musicPath = await prepareMusicInput(musicUrl).catch((error) => {
+      console.warn(`prepare track music failed for ${safeTrack.title}:`, error.message);
+      return "";
+    });
+  }
   if (!musicPath) {
-    throw new Error(`无法为 ${safeTrack.title} 准备背景音乐`);
+    usedFallbackMusic = true;
+    console.warn(`无法为 ${safeTrack.title} 准备原曲背景音乐，使用 fallback 背景继续生成播客`);
+    musicPath = await createFallbackMusic();
   }
   const voicePath = await createSpeech(podcastScript.script, voice);
   const { outputPath, outputName, audioDiagnostics } = await mixPodcast({ musicPath, voicePath });
@@ -1305,6 +1535,7 @@ async function createTrackPodcastEpisode({ track, prompt, voice, memory, cookie,
     musicUrl,
     podcastAudioUrl: outputUrl,
     outputUrl,
+    usedFallbackMusic,
     audioDiagnostics,
     transcriptSegments,
     lyricSegments
@@ -1393,11 +1624,11 @@ function normalizePlaylistItem(item) {
 }
 
 function normalizeQQMusicPlaylistItem(item) {
-  const id = item.dissid || item.tid || item.id || item.dirid || item.encrypt_uin || "";
+  const id = item.dissid || item.disstid || item.tid || item.id || item.dirid || "";
   return {
     id,
-    name: item.diss_name || item.title || item.name || item.dirname || "未命名 QQ 歌单",
-    cover: item.diss_cover || item.logo || item.picurl || item.cover || "",
+    name: item.diss_name || item.dissname || item.title || item.name || item.dirname || "未命名 QQ 歌单",
+    cover: item.diss_cover || item.logo || item.picurl || item.cover || item.imgurl || "",
     description: item.desc || item.intro || item.description || "",
     trackCount: item.song_cnt || item.songnum || item.song_count || item.total_song_num || 0,
     playCount: item.listen_num || item.visitnum || item.playCount || 0,
@@ -1449,9 +1680,21 @@ function normalizeQQMusicTrackItem(item) {
     publishTime: item.time_public || item.public_time || "",
     year: String(item.time_public || item.public_time || "").slice(0, 4),
     mediaId: item.strMediaMid || item.media_mid || mid,
+    qqSearchKey: `${item.songname || item.name || item.title || ""} ${artist || ""}`.trim(),
     platform: "qq",
     raw: item
   };
+}
+
+function looksLikeQQSongMid(value) {
+  return /^[A-Za-z0-9]{14}$/.test(String(value || ""));
+}
+
+function inferMusicPlatform(track = {}, fallback = defaultMusicPlatform) {
+  const explicit = String(track.platform || "").trim().toLowerCase();
+  if (looksLikeQQSongMid(track.id || track.songmid || track.mid || track.mediaId || track.media_mid)) return "qq";
+  if (explicit === "qq" || explicit === "netease" || explicit === "kuwo" || explicit === "kugou") return explicit;
+  return fallback;
 }
 
 function buildTranscriptSegments(script, narrationDurationSeconds, offsetSeconds = narrationLeadInSeconds) {
@@ -1786,6 +2029,8 @@ async function fetchQQMusicApi1(pathname, { method = "GET", params = {}, body, c
   const headers = { Accept: "application/json" };
   const cookie = credentialCookieFromQQMusicApi1Credential(credential);
   if (cookie) headers.Cookie = cookie;
+  if (credential?.musicid) headers.musicid = String(credential.musicid);
+  if (credential?.musickey) headers.musickey = String(credential.musickey);
   if (body) headers["Content-Type"] = "application/json";
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
@@ -1894,7 +2139,8 @@ function normalizeQQMusicApi1SearchResponse(payload) {
       album: item.album?.name || item.albumname || item.album,
       cover: item.cover || item.pic || (albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : ""),
       duration: item.interval || item.duration,
-      sourceIndex
+      sourceIndex,
+      qqSearchKey: item.qqSearchKey || item.keyword || ""
     }, "qq");
   }).filter((item) => item.id || item.url);
 }
@@ -1910,6 +2156,47 @@ async function searchQQMusicApi1({ keyword, count = 10, page = 1 }) {
     }
   });
   return normalizeQQMusicApi1SearchResponse(payload);
+}
+
+function pickMusicsquareTangQQUrl(item = {}) {
+  return (
+    item.song_play_url_sq ||
+    item.song_play_url_pq ||
+    item.song_play_url_accom ||
+    item.song_play_url_hq ||
+    item.song_play_url_standard ||
+    item.song_play_url_fq ||
+    item.song_play_url ||
+    ""
+  );
+}
+
+function normalizeMusicsquareTangQQSearchResponse(payload, keyword) {
+  const candidates = Array.isArray(payload) ? payload : Array.isArray(payload?.data) ? payload.data : [];
+  return candidates.map((item, sourceIndex) => {
+    const mid = item.song_mid || item.songmid || item.mid || item.id || "";
+    return normalizeSearchItem({
+      ...item,
+      id: mid,
+      songmid: mid,
+      title: item.song_title || item.song_name || item.title || item.name,
+      artist: item.singer_name || item.singer || item.artist,
+      album: item.album_name || item.album_title || item.album,
+      cover: item.album_pic || item.singer_pic || item.cover,
+      duration: item.duration || item.interval,
+      url: "",
+      qqSearchKey: keyword,
+      sourceIndex
+    }, "qq");
+  }).filter((item) => item.id || item.url);
+}
+
+async function searchMusicsquareQQ({ keyword, count = 10 }) {
+  const url = new URL("https://tang.api.s01s.cn/music_open_api.php");
+  url.searchParams.set("msg", keyword);
+  url.searchParams.set("type", "json");
+  const payload = await fetchJsonWithTimeout(url);
+  return normalizeMusicsquareTangQQSearchResponse(payload, keyword).slice(0, count);
 }
 
 async function searchWpMusic({ keyword, platform, count = 10, page = 1 }) {
@@ -1967,7 +2254,407 @@ async function resolveQQMusicApi1Url({ id, mediaId = "", songType = null }) {
       first?.purl && `https://isure.stream.qqmusic.qq.com/${first.purl}` ||
       payload?.url ||
       "";
-    if (isPlayableMusicUrl(candidate)) return candidate;
+    const verified = await pickVerifiedMusicUrl(candidate, `QQMusicApi1 file_type=${fileType}`);
+    if (verified) return verified;
+  }
+  return "";
+}
+
+const qqMusicOfficialQualities = [
+  ["AI00", ".flac"],
+  ["Q000", ".flac"],
+  ["Q001", ".flac"],
+  ["F000", ".flac"],
+  ["O801", ".ogg"],
+  ["O800", ".ogg"],
+  ["O600", ".ogg"],
+  ["O400", ".ogg"],
+  ["M800", ".mp3"],
+  ["M500", ".mp3"],
+  ["C600", ".m4a"],
+  ["C400", ".m4a"],
+  ["C200", ".m4a"]
+];
+
+const qqMusicEncryptedQualities = [
+  ["AIM0", ".mflac"],
+  ["Q0M0", ".mflac"],
+  ["Q0M1", ".mflac"],
+  ["F0M0", ".mflac"],
+  ["O801", ".mgg"],
+  ["O800", ".mgg"],
+  ["O6M0", ".mgg"],
+  ["O4M0", ".mgg"]
+];
+
+function randomQQGuid() {
+  return crypto.randomBytes(16).toString("hex");
+}
+
+function qqMusicCredentialFromStateForOfficial(state = {}) {
+  const credential = qqMusicApi1CredentialFromState(state);
+  if (credential?.musicid && credential?.musickey) return credential;
+  const cookies = cookieObjectFromList(state.cookies || []);
+  return normalizeQQMusicApi1Credential({
+    ...cookies,
+    musicid: cookies.musicid || cookies.uin || state.uin,
+    musickey: cookies.musickey || cookies.qqmusic_key || cookies.qm_keyst
+  });
+}
+
+function buildQQMusicOfficialRequest({ params, module, method, credential, encrypted = false }) {
+  const comm = {
+    ct: encrypted ? "19" : "11",
+    tmeAppID: "qqmusic",
+    format: "json",
+    inCharset: "utf-8",
+    outCharset: "utf-8",
+    uid: "3931641530",
+    cv: 13020508,
+    v: 13020508,
+    QIMEI36: "6c9d3cd110abca9b16311cee10001e717614"
+  };
+  if (credential?.musicid && credential?.musickey) {
+    comm.qq = String(credential.musicid);
+    comm.authst = String(credential.musickey);
+    comm.tmeLoginType = String(credential.login_type || credential.loginType || (String(credential.musickey).startsWith("W_X") ? 1 : 2));
+  }
+  return {
+    comm,
+    [`${module}.${method}`]: {
+      module,
+      method,
+      param: params
+    }
+  };
+}
+
+async function fetchQQMusicOfficialUrl({ id, mediaId = "", encrypted = false, songType = 0 }) {
+  const state = await readQQMusicState().catch(() => ({}));
+  const credential = qqMusicCredentialFromStateForOfficial(state);
+  const guid = randomQQGuid();
+  const qualities = encrypted ? qqMusicEncryptedQualities : qqMusicOfficialQualities;
+  const endpoint = encrypted ? "https://u.y.qq.com/cgi-bin/musics.fcg" : "https://u.y.qq.com/cgi-bin/musicu.fcg";
+  const module = encrypted ? "music.vkey.GetEVkey" : "music.vkey.GetVkey";
+  const method = encrypted ? "CgiGetEVkey" : "UrlGetVkey";
+  const resultPath = encrypted
+    ? ["music.vkey.GetEVkey.CgiGetEVkey", "data", "midurlinfo", 0]
+    : ["music.vkey.GetVkey.UrlGetVkey", "data", "midurlinfo", 0];
+  const fileMid = mediaId || id;
+
+  for (const [prefix, ext] of qualities) {
+    const filename = `${prefix}${fileMid}${fileMid}${ext}`;
+    const body = buildQQMusicOfficialRequest({
+      encrypted,
+      credential,
+      module,
+      method,
+      params: {
+        filename: [filename],
+        guid,
+        songmid: [id],
+        songtype: [Number(songType) || 0]
+      }
+    });
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Accept: "application/json,text/plain,*/*",
+        "Content-Type": "application/json",
+        Referer: "https://y.qq.com/",
+        Origin: "https://y.qq.com",
+        "User-Agent": "Mozilla/5.0"
+      },
+      body: JSON.stringify(body)
+    }).catch(() => null);
+    if (!response?.ok) continue;
+    const payload = await response.json().catch(() => null);
+    const info = resultPath.reduce((acc, key) => acc?.[key], payload);
+    const purl = info?.purl || info?.wifiurl || "";
+    const candidate = purl ? new URL(purl, "https://isure.stream.qqmusic.qq.com/").toString() : "";
+    const verified = await pickVerifiedMusicUrl(candidate, `musicdl official ${encrypted ? "EVkey" : "Vkey"} ${filename}`);
+    if (verified) return verified;
+  }
+  return "";
+}
+
+async function resolveCharlesMusicdlOfficialQQUrl({ id, mediaId = "", songType = null }) {
+  const plain = await fetchQQMusicOfficialUrl({ id, mediaId, songType, encrypted: false }).catch((error) => {
+    console.warn("musicdl official Vkey fallback failed:", error.message);
+    return "";
+  });
+  if (plain) return plain;
+  return fetchQQMusicOfficialUrl({ id, mediaId, songType, encrypted: true }).catch((error) => {
+    console.warn("musicdl official EVkey fallback failed:", error.message);
+    return "";
+  });
+}
+
+async function resolveMusicsquareTangQQUrl({ id, keyword = "" }) {
+  const mid = String(id || "").trim();
+  if (!mid) return "";
+  const url = new URL("https://tang.api.s01s.cn/music_open_api.php");
+  url.searchParams.set("msg", keyword || mid);
+  url.searchParams.set("type", "json");
+  url.searchParams.set("mid", mid);
+  const payload = await fetchJsonWithTimeout(url);
+  const candidate = pickMusicsquareTangQQUrl(payload);
+  const verified = await pickVerifiedMusicUrl(candidate, "musicsquare tang qq detail");
+  if (verified) return verified;
+  return pickVerifiedMusicUrl(pickFirstPlayableUrl(payload), "musicsquare tang qq detail fallback");
+}
+
+async function fetchQQMusicLegacySongFile(mid) {
+  if (!mid) return null;
+  const url = new URL("https://c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg");
+  url.searchParams.set("songmid", mid);
+  url.searchParams.set("tpl", "yqq_song_detail");
+  url.searchParams.set("format", "json");
+  url.searchParams.set("callback", "getOneSongInfoCallback");
+  url.searchParams.set("g_tk", "5381");
+  url.searchParams.set("jsonCallback", "getOneSongInfoCallback");
+  url.searchParams.set("loginUin", "0");
+  url.searchParams.set("hostUin", "0");
+  url.searchParams.set("inCharset", "utf8");
+  url.searchParams.set("outCharset", "utf-8");
+  url.searchParams.set("notice", "0");
+  url.searchParams.set("platform", "yqq");
+  url.searchParams.set("needNewCode", "0");
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json,text/plain,*/*",
+      Referer: `https://y.qq.com/n/yqq/song/${mid}.html`,
+      "User-Agent": "Mozilla/5.0"
+    }
+  });
+  if (!response.ok) throw new Error(`QQ legacy song info failed: ${response.status}`);
+  const text = await response.text();
+  const jsonText = text.replace(/^getOneSongInfoCallback\(|\)$/g, "");
+  const payload = JSON.parse(jsonText);
+  const song = Array.isArray(payload?.data) ? payload.data[0] : null;
+  return song?.file || null;
+}
+
+async function fetchQQMusicLegacyVkey(mid, filename, uin = "1008611", guid = "1234567890") {
+  const url = new URL("https://c.y.qq.com/base/fcgi-bin/fcg_music_express_mobile3.fcg");
+  url.searchParams.set("g_tk", "0");
+  url.searchParams.set("loginUin", uin);
+  url.searchParams.set("hostUin", "0");
+  url.searchParams.set("format", "json");
+  url.searchParams.set("inCharset", "utf8");
+  url.searchParams.set("outCharset", "utf-8");
+  url.searchParams.set("notice", "0");
+  url.searchParams.set("platform", "yqq");
+  url.searchParams.set("needNewCode", "0");
+  url.searchParams.set("cid", "205361747");
+  url.searchParams.set("uin", uin);
+  url.searchParams.set("songmid", mid);
+  url.searchParams.set("filename", filename);
+  url.searchParams.set("guid", guid);
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json,text/plain,*/*",
+      Referer: `https://y.qq.com/n/yqq/song/${mid}.html`,
+      "User-Agent": "Mozilla/5.0"
+    }
+  });
+  if (!response.ok) throw new Error(`QQ legacy vkey failed: ${response.status}`);
+  const payload = await response.json();
+  return payload?.data?.items?.[0]?.vkey || "";
+}
+
+async function resolveQQMusicDownloadCompatUrl({ id, mediaId = "" }) {
+  const mid = String(id || "").trim();
+  if (!mid) return "";
+  const file = await fetchQQMusicLegacySongFile(mid).catch((error) => {
+    console.warn("qqMusicDownload song info fallback failed:", error.message);
+    return null;
+  });
+  const fileMid = mediaId || file?.media_mid || mid;
+  const candidates = [
+    file?.size_320mp3 ? { prefix: "M800", ext: "mp3" } : null,
+    file?.size_128mp3 ? { prefix: "M500", ext: "mp3" } : null
+  ].filter(Boolean);
+  for (const item of candidates) {
+    const filename = `${item.prefix}${fileMid}.${item.ext}`;
+    const vkey = await fetchQQMusicLegacyVkey(mid, filename).catch((error) => {
+      console.warn("qqMusicDownload vkey fallback failed:", error.message);
+      return "";
+    });
+    if (!vkey) continue;
+    const candidate = `http://streamoc.music.tc.qq.com/${filename}?vkey=${encodeURIComponent(vkey)}&guid=1234567890&uin=1008611&fromtag=8`;
+    const verified = await pickVerifiedMusicUrl(candidate, `qqMusicDownload ${filename}`);
+    if (verified) return verified;
+  }
+  return "";
+}
+
+async function resolveMusicDlQQCompatUrl({ id }) {
+  const mid = String(id || "").trim();
+  if (!mid) return "";
+  const guid = String(Math.floor(1_000_000_000 + Math.random() * 9_000_000_000));
+  const rates = [
+    { prefix: "A000", ext: "ape" },
+    { prefix: "F000", ext: "flac" },
+    { prefix: "M800", ext: "mp3" },
+    { prefix: "C400", ext: "m4a" },
+    { prefix: "M500", ext: "mp3" }
+  ];
+  for (const rate of rates) {
+    const filename = `${rate.prefix}${mid}.${rate.ext}`;
+    const vkey = await fetchQQMusicLegacyVkey(mid, filename, "3051522991", guid).catch((error) => {
+      console.warn("music-dl qq vkey fallback failed:", error.message);
+      return "";
+    });
+    if (!vkey) continue;
+    const candidate = `http://dl.stream.qqmusic.qq.com/${filename}?vkey=${encodeURIComponent(vkey)}&guid=${guid}&uin=3051522991&fromtag=64`;
+    const verified = await pickVerifiedMusicUrl(candidate, `music-dl ${filename}`);
+    if (verified) return verified;
+  }
+  return "";
+}
+
+function pickFirstPlayableUrl(value) {
+  if (!value) return "";
+  if (typeof value === "string") return isPlayableMusicUrl(value) ? value : "";
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const candidate = pickFirstPlayableUrl(item);
+      if (candidate) return candidate;
+    }
+    return "";
+  }
+  if (typeof value !== "object") return "";
+  const directKeys = ["url", "music_url", "music", "download_url", "play_url", "song_play_url_sq", "song_play_url_hq", "song_play_url", "song_play_url_standard"];
+  for (const key of directKeys) {
+    const candidate = pickFirstPlayableUrl(value[key]);
+    if (candidate) return candidate;
+  }
+  for (const item of Object.values(value)) {
+    if (!item || typeof item !== "object") continue;
+    const candidate = pickFirstPlayableUrl(item);
+    if (candidate) return candidate;
+  }
+  return "";
+}
+
+async function fetchJsonWithTimeout(url, { headers = {}, timeoutMs = 8000 } = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/json,text/plain,*/*",
+        "User-Agent": "Mozilla/5.0",
+        ...headers
+      },
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const text = await response.text();
+    try {
+      return text ? JSON.parse(text) : {};
+    } catch (_error) {
+      throw new Error("invalid JSON");
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function resolveCharlesMusicdlQQCompatUrl({ id }) {
+  if (!qqMusicCharlesMusicdlFallbackEnabled) return "";
+  const mid = String(id || "").trim();
+  if (!mid) return "";
+
+  const resolvers = {
+    async nki() {
+      for (const key of qqMusicThirdPartyKeys.nki) {
+        const url = new URL("https://api.nki.pw/API/music_open_api.php");
+        url.searchParams.set("mid", mid);
+        url.searchParams.set("apikey", key);
+        const candidate = pickFirstPlayableUrl(await fetchJsonWithTimeout(url).catch(() => null));
+        if (candidate) return candidate;
+      }
+      return "";
+    },
+    async tang() {
+      const url = new URL("https://tang.api.s01s.cn/music_open_api.php");
+      url.searchParams.set("mid", mid);
+      return pickFirstPlayableUrl(await fetchJsonWithTimeout(url));
+    },
+    async xianyuw() {
+      for (const key of qqMusicThirdPartyKeys.xianyuw) {
+        const url = new URL("https://apii.xianyuw.cn/api/v1/qq-music-search");
+        url.searchParams.set("id", mid);
+        url.searchParams.set("key", key);
+        url.searchParams.set("no_url", "0");
+        url.searchParams.set("br", "hires");
+        const candidate = pickFirstPlayableUrl(await fetchJsonWithTimeout(url).catch(() => null));
+        if (candidate) return candidate;
+      }
+      return "";
+    },
+    async xunhuisi() {
+      const url = new URL("https://api.xunhuisi.store/API/QQMusic/Song.php");
+      url.searchParams.set("mid", mid);
+      url.searchParams.set("type", "json");
+      return pickFirstPlayableUrl(await fetchJsonWithTimeout(url));
+    },
+    async lpz() {
+      const url = new URL("https://lpz.chatc.vip/apiqq.php");
+      url.searchParams.set("songmid", mid);
+      url.searchParams.set("type", "json");
+      url.searchParams.set("br", "1");
+      return pickFirstPlayableUrl(await fetchJsonWithTimeout(url));
+    },
+    async lxmusic() {
+      for (const quality of ["flac24bit", "hires", "flac", "320k", "128k"]) {
+        const url = new URL(`https://lxmusicapi.onrender.com/url/tx/${encodeURIComponent(mid)}/${quality}`);
+        const candidate = pickFirstPlayableUrl(await fetchJsonWithTimeout(url, {
+          headers: {
+            "Content-Type": "application/json",
+            "X-Request-Key": process.env.QQMUSIC_LXMUSIC_REQUEST_KEY || "share-v3",
+            "User-Agent": "lx-music-request/2.6.0"
+          }
+        }).catch(() => null));
+        if (candidate && !candidate.includes("panspace.kuwo.cn")) return candidate;
+      }
+      return "";
+    },
+    async vkeys() {
+      for (const quality of [9, 8, 7, 6, 5, 4, 3, 2, 1]) {
+        const url = new URL("https://api.vkeys.cn/music/tencent/song/link");
+        url.searchParams.set("mid", mid);
+        url.searchParams.set("quality", String(quality));
+        const candidate = pickFirstPlayableUrl(await fetchJsonWithTimeout(url).catch(() => null));
+        if (candidate) return candidate;
+      }
+      return "";
+    },
+    async cy() {
+      for (const key of qqMusicThirdPartyKeys.cy) {
+        const url = new URL("https://cyapi.top/API/qq_music.php");
+        url.searchParams.set("apikey", key);
+        url.searchParams.set("type", "json");
+        url.searchParams.set("mid", mid);
+        url.searchParams.set("quality", "lossless");
+        const candidate = pickFirstPlayableUrl(await fetchJsonWithTimeout(url).catch(() => null));
+        if (candidate) return candidate;
+      }
+      return "";
+    }
+  };
+
+  for (const apiName of qqMusicCharlesMusicdlFallbackApis) {
+    const resolver = resolvers[apiName];
+    if (!resolver) continue;
+    const candidate = await resolver().catch((error) => {
+      console.warn(`CharlesPikachu/musicdl ${apiName} fallback failed:`, error.message);
+      return "";
+    });
+    const verified = await pickVerifiedMusicUrl(candidate, `CharlesPikachu/musicdl ${apiName}`);
+    if (verified) return verified;
   }
   return "";
 }
@@ -2025,6 +2712,7 @@ function normalizeSearchItem(item, platform) {
     url: item.url || item.music_url || item.play_url || item.song_url || "",
     platform,
     sourceIndex: item.sourceIndex,
+    qqSearchKey: item.qqSearchKey || item.keyword || "",
     raw: item
   };
 }
@@ -2039,6 +2727,66 @@ function isPlayableMusicUrl(url) {
   return typeof url === "string" && /^https?:\/\//i.test(url) && !url.includes("付费歌曲");
 }
 
+function looksLikeAudioBuffer(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 16) return false;
+  const head = buffer.subarray(0, 16);
+  const ascii = head.toString("utf8").trimStart().toLowerCase();
+  if (ascii.startsWith("<!doctype") || ascii.startsWith("<html") || ascii.startsWith("{") || ascii.startsWith("[")) return false;
+  return (
+    head.subarray(0, 3).toString("latin1") === "ID3" ||
+    head[0] === 0xff && (head[1] & 0xe0) === 0xe0 ||
+    head.subarray(0, 4).toString("latin1") === "fLaC" ||
+    head.subarray(0, 4).toString("latin1") === "OggS" ||
+    head.subarray(0, 4).toString("latin1") === "RIFF" ||
+    head.subarray(4, 8).toString("latin1") === "ftyp"
+  );
+}
+
+function summarizeNonAudioPayload(buffer) {
+  const text = Buffer.isBuffer(buffer) ? buffer.subarray(0, 240).toString("utf8").replace(/\s+/g, " ").trim() : "";
+  if (/^\s*</.test(text)) return "下载到的是 HTML 页面，可能是音乐外链防盗链或接口错误页";
+  if (/^\s*[\[{]/.test(text)) return `下载到的是 JSON 错误响应：${text.slice(0, 160)}`;
+  return text ? `下载到的不是音频：${text.slice(0, 160)}` : "下载到的不是音频";
+}
+
+async function verifyRemoteMusicUrl(url, label = "music url") {
+  if (!isPlayableMusicUrl(url)) return false;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Range: "bytes=0-65535",
+        ...musicDownloadHeaders(url)
+      },
+      signal: controller.signal
+    });
+    if (!response.ok && response.status !== 206) {
+      console.warn(`${label} preflight failed: HTTP ${response.status}`);
+      return false;
+    }
+    const contentType = response.headers.get("content-type") || "";
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (/text\/html|application\/json|text\/plain/i.test(contentType) && !looksLikeAudioBuffer(buffer)) {
+      console.warn(`${label} preflight rejected: ${contentType} ${summarizeNonAudioPayload(buffer)}`);
+      return false;
+    }
+    if (looksLikeAudioBuffer(buffer)) return true;
+    if (/audio\//i.test(contentType) && buffer.length > 0) return true;
+    console.warn(`${label} preflight rejected: ${summarizeNonAudioPayload(buffer)}`);
+    return false;
+  } catch (error) {
+    console.warn(`${label} preflight failed:`, error.message);
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function pickVerifiedMusicUrl(url, label) {
+  return (await verifyRemoteMusicUrl(url, label)) ? url : "";
+}
+
 async function searchMusic({ keyword, platform, count = 10, page = 1 }) {
   if (platform === "qq") {
     const api1Items = await searchQQMusicApi1({ keyword, count, page }).catch((error) => {
@@ -2046,6 +2794,12 @@ async function searchMusic({ keyword, platform, count = 10, page = 1 }) {
       return null;
     });
     if (api1Items?.length) return api1Items;
+
+    const tangItems = await searchMusicsquareQQ({ keyword, count }).catch((error) => {
+      console.warn("musicsquare tang qq search failed:", error.message);
+      return null;
+    });
+    if (tangItems?.length) return tangItems;
   }
 
   const wpItems = await searchWpMusic({ keyword, platform, count, page }).catch((error) => {
@@ -2089,16 +2843,20 @@ async function searchMusic({ keyword, platform, count = 10, page = 1 }) {
   return normalizeSearchResponse(payload, platform);
 }
 
-async function resolveMusicUrl({ id, url: directUrl, platform }) {
-  if (isPlayableMusicUrl(directUrl)) return directUrl;
+async function resolveMusicUrl({ id, url: directUrl, platform, mediaId = "", songType = null, keyword = "" }) {
+  if (isPlayableMusicUrl(directUrl)) {
+    const verifiedDirect = await pickVerifiedMusicUrl(directUrl, `${platform || "music"} direct url`);
+    if (verifiedDirect) return verifiedDirect;
+  }
   if (!id || platform === "demo") return "";
 
   if (platform === "qq") {
-    const api1Url = await resolveQQMusicApi1Url({ id }).catch((error) => {
-      console.warn("QQMusicApi1 resolve failed:", error.message);
+    const tangDetailUrl = await resolveMusicsquareTangQQUrl({ id, keyword }).catch((error) => {
+      console.warn("musicsquare tang qq resolve failed:", error.message);
       return "";
     });
-    if (isPlayableMusicUrl(api1Url)) return api1Url;
+    if (isPlayableMusicUrl(tangDetailUrl)) return tangDetailUrl;
+    return "";
   }
 
   const wpUrl = await resolveWpMusicUrl({ id, platform }).catch((error) => {
@@ -2245,7 +3003,8 @@ async function findBackgroundMusic({ prompt, trackTitle, platform }) {
       const musicUrl = await resolveMusicUrl({
         id: selected.id,
         url: selected.url,
-        platform: selected.platform || currentPlatform
+        platform: selected.platform || currentPlatform,
+        keyword: selected.qqSearchKey || keyword
       }).catch((error) => {
         console.warn(`Background music resolve failed on ${selected.platform || currentPlatform}:`, error.message);
         return "";
@@ -2421,7 +3180,12 @@ async function findMusicCandidates({ keyword, limit = 6 }) {
         });
         const musicUrl =
           indexed?.musicUrl ||
-          (await resolveMusicUrl({ id: item.id, url: item.url, platform: item.platform || currentPlatform }).catch(() => ""));
+          (await resolveMusicUrl({
+            id: item.id,
+            url: item.url,
+            platform: item.platform || currentPlatform,
+            keyword: item.qqSearchKey || currentKeyword
+          }).catch(() => ""));
         const candidate = {
           id: item.id,
           title: indexed?.trackTitle || item.title,
@@ -2652,25 +3416,65 @@ async function createFallbackMusic() {
     "-i",
     "anoisesrc=color=pink:duration=75:amplitude=0.08",
     "-filter_complex",
-    "[0:a]volume=0.05[a0];[1:a]volume=0.035[a1];[a0][a1]amix=inputs=2:duration=longest",
+    "[0:a]volume=0.2[a0];[1:a]volume=0.08[a1];[a0][a1]amix=inputs=2:duration=longest,alimiter=limit=0.85",
     outputPath
   ]);
   return outputPath;
+}
+
+function musicDownloadHeaders(url) {
+  const headers = {
+    Accept: "audio/*,*/*;q=0.8",
+    "User-Agent": "Mozilla/5.0"
+  };
+  const hostname = (() => {
+    try {
+      return new URL(url).hostname;
+    } catch (_error) {
+      return "";
+    }
+  })();
+  if (/qqmusic\.qq\.com|music\.tc\.qq\.com|gtimg\.cn/i.test(hostname)) {
+    headers.Referer = "https://y.qq.com/";
+    headers.Origin = "https://y.qq.com";
+  }
+  return headers;
 }
 
 async function prepareMusicInput(musicUrl) {
   if (!musicUrl) return "";
   const outputPath = path.join(generatedDir, `source-${nanoid(8)}.mp3`);
   const response = await fetch(musicUrl, {
-    headers: {
-      "User-Agent": "Mozilla/5.0"
-    }
+    headers: musicDownloadHeaders(musicUrl)
   });
   if (!response.ok) throw new Error(`Music download failed: ${response.status}`);
+  const contentType = response.headers.get("content-type") || "";
   const buffer = Buffer.from(await response.arrayBuffer());
   if (buffer.length < 32_000) throw new Error(`Music download too small: ${buffer.length} bytes`);
+  if (/text\/html|application\/json|text\/plain/i.test(contentType) && !looksLikeAudioBuffer(buffer)) {
+    throw new Error(`Music download returned ${contentType}: ${summarizeNonAudioPayload(buffer)}`);
+  }
+  if (!looksLikeAudioBuffer(buffer)) {
+    throw new Error(summarizeNonAudioPayload(buffer));
+  }
   await writeFile(outputPath, buffer);
-  await execFileAsync(ffprobeBin, ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1", outputPath]);
+  const { stdout } = await execFileAsync(ffprobeBin, [
+    "-v",
+    "error",
+    "-select_streams",
+    "a:0",
+    "-show_entries",
+    "stream=codec_type:format=duration",
+    "-of",
+    "json",
+    outputPath
+  ]);
+  const info = JSON.parse(stdout || "{}");
+  const hasAudio = Array.isArray(info.streams) && info.streams.some((stream) => stream.codec_type === "audio");
+  const duration = Number.parseFloat(info.format?.duration || "0");
+  if (!hasAudio || !Number.isFinite(duration) || duration <= 0) {
+    throw new Error("Music download is not a valid audio stream");
+  }
   return outputPath;
 }
 
@@ -2962,7 +3766,10 @@ app.get("/api/qqmusic/playlists", async (req, res, next) => {
     const items = await fetchQQMusicPlaylists(req);
     res.json({ items });
   } catch (error) {
-    next(error);
+    res.status(200).json({
+      items: [],
+      warning: error.message || "QQ 音乐歌单暂时没有载入"
+    });
   }
 });
 
@@ -3049,7 +3856,10 @@ app.post("/api/music/resolve", async (req, res, next) => {
     let musicUrl = await resolveMusicUrl({
       id: req.body?.id,
       url: req.body?.url,
-      platform: req.body?.platform || defaultMusicPlatform
+      platform: inferMusicPlatform(req.body || {}, req.body?.platform || defaultMusicPlatform),
+      mediaId: req.body?.mediaId || req.body?.media_mid || "",
+      songType: req.body?.songType || req.body?.song_type || null,
+      keyword: req.body?.qqSearchKey || req.body?.musicKeyword || req.body?.keyword || ""
     });
     if (!musicUrl && req.body?.musicKeyword && req.body?.sourceIndex !== undefined) {
       const indexed = await resolveMusicFromSearchIndex({
@@ -3117,7 +3927,8 @@ app.post("/api/agent/create", upload.single("track"), async (req, res, next) => 
       musicUrl = await resolveMusicUrl({
         id: req.body.musicId,
         url: req.body.musicUrl,
-        platform: req.body.platform || defaultMusicPlatform
+        platform: inferMusicPlatform({ id: req.body.musicId, platform: req.body.platform }, req.body.platform || defaultMusicPlatform),
+        keyword: req.body.qqSearchKey || req.body.musicKeyword || req.body.keyword || ""
       });
     }
     let selectedBackgroundMusic = null;
@@ -3181,16 +3992,20 @@ app.post("/api/agent/create", upload.single("track"), async (req, res, next) => 
 
     const firstTrack = selectedTrackList[0] || playlistTracks[0];
     if (firstTrack) {
+      const firstTrackPlatform = inferMusicPlatform(firstTrack, req.body.platform || defaultMusicPlatform);
       backgroundMusic = {
         musicUrl: "",
         trackTitle: firstTrack.title,
         artist: firstTrack.artist,
-        platform: "netease",
-        id: firstTrack.id
+        platform: firstTrackPlatform,
+        id: firstTrack.id,
+        mediaId: firstTrack.mediaId || firstTrack.media_mid || firstTrack.raw?.strMediaMid || firstTrack.raw?.media_mid || ""
       };
       musicUrl = await resolveMusicUrl({
         id: firstTrack.id,
-        platform: "netease"
+        platform: firstTrackPlatform,
+        mediaId: backgroundMusic.mediaId,
+        keyword: firstTrack.qqSearchKey || firstTrack.raw?.qqSearchKey || `${firstTrack.title || ""} ${firstTrack.artist || ""}`.trim()
       }).catch(() => "");
       backgroundMusic.musicUrl = musicUrl;
       trackTitle = firstTrack.title || brief.title || trackTitle;
@@ -3277,7 +4092,7 @@ app.post("/api/agent/create", upload.single("track"), async (req, res, next) => 
       const episode = validPodcastEpisodes.find((item) => String(item.id || "") === String(track.id || ""));
       return {
         ...track,
-        platform: "netease",
+        platform: inferMusicPlatform(track, backgroundMusic.platform || defaultMusicPlatform),
         narration: queueNoteMap.get(String(track.id || "")) || "",
         podcastScript: episode?.podcastScript || songMeta?.podcastScript || null,
         songDetails: episode?.songDetails || songMeta?.songDetails || null,
@@ -3477,6 +4292,7 @@ if (!isVercel) {
   const port = Number(process.env.PORT || 8787);
   app.listen(port, () => {
     console.log(`云韶 API listening on http://localhost:${port}`);
+    console.log("QQ music resolver: musicsquare tang detail only");
   });
 }
 

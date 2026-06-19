@@ -20,9 +20,20 @@ Set these in Vercel Project Settings:
 - `MUSIC_API_DEFAULT_PLATFORM=netease`
 - `MUSIC_API_PLATFORMS=netease`
 
-`QQMUSIC_API1_BASE_URL` points to a running [goodday1024/QQMusicApi1](https://github.com/goodday1024/QQMusicApi1) Web service, for example `http://localhost:8080`. CaelumShao prefers this service for QQ scan login, QQ search, and QQ song URLs.
+`QQMUSIC_API1_BASE_URL` points to a running [goodday1024/QQMusicApi1](https://github.com/goodday1024/QQMusicApi1) Web service, for example `http://49.51.189.172:8000` or your own `http://localhost:8080`. CaelumShao prefers this service for QQ scan login, QQ playlists, favorite songs, search, and QQ song URLs.
 
 `WP_MUSIC_API_BASE_URL` points to a running [GitHub-ZC/wp_MusicApi](https://github.com/GitHub-ZC/wp_MusicApi) service, for example `http://localhost:5000` locally or your deployed service URL. CaelumShao uses wp_MusicApi as a fallback for QQ search/play URLs, then falls back to the older PHP music API and SDK paths.
+
+`QQMUSIC_CHARLES_MUSICDL_FALLBACK=true` enables the QQ playback strategy inspired by [CharlesPikachu/musicdl](https://github.com/CharlesPikachu/musicdl): first try QQ's official `musicu.fcg` Vkey/EVkey flow with the current QQ Music login credential, then try selected third-party resolvers. The upstream project is PolyForm Noncommercial licensed, so CaelumShao does not vendor or copy that package; it only implements compatible request strategies in this codebase. You can choose resolver order with `QQMUSIC_CHARLES_MUSICDL_APIS=nki,tang,xunhuisi,lpz,lxmusic,vkeys`.
+
+Optional third-party resolver keys:
+
+- `QQMUSIC_NKI_API_KEYS`
+- `QQMUSIC_XIANYUW_API_KEYS`
+- `QQMUSIC_CY_API_KEYS`
+- `QQMUSIC_LXMUSIC_REQUEST_KEY=share-v3`
+
+Leave these empty unless you own valid keys. Resolvers without keys are skipped automatically.
 
 ## Recommended
 
