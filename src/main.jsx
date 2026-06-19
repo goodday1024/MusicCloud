@@ -835,9 +835,7 @@ function App() {
   const [qqQrConfigIndex, setQqQrConfigIndex] = useState(0);
 
   const audioRef = useRef(null);
-  const analyserRef = useRef(null);
-  const audioContextRef = useRef(null);
-  const sourceNodeRef = useRef(null);
+  const podcastAudioRef = useRef(null);
   const queueRef = useRef([]);
   const queueIndexRef = useRef(-1);
   const playTokenRef = useRef(0);
@@ -876,6 +874,23 @@ function App() {
   const displayTrack = panelOpen ? infoTrack || selectedTrack || filteredTracks[0] || libraryTracks[0] || null : null;
   const playlistCount = new Set(libraryTracks.map((track) => track.playlistId).filter(Boolean)).size;
   const titleLines = splitTitle(displayTrack?.title || BRAND_CN);
+
+  function buildPlaybackQueue(track) {
+    if (!track) return [];
+    if (!isLoggedIn) return [track];
+    const source = (globalSearchEnabled ? sphereTracks : filteredTracks)
+      .filter((item) => item && !item.artistCenter && !item.placeholder);
+    const currentKey = trackKey(track);
+    const index = source.findIndex((item) => trackKey(item) === currentKey);
+    const ordered = index >= 0 ? [...source.slice(index), ...source.slice(0, index)] : [track, ...source];
+    const seen = new Set();
+    return ordered.filter((item) => {
+      const key = trackKey(item);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
 
   async function refreshNeteaseState() {
     const response = await fetch("/api/netease/state");
@@ -1041,6 +1056,11 @@ function App() {
     const onPause = () => setIsPlaying(false);
     const onMeta = () => setAudioDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
     const onEnded = () => {
+      if (!isLoggedIn) {
+        setIsPlaying(false);
+        setMessage("播放完成");
+        return;
+      }
       const nextIndex = queueIndexRef.current + 1;
       if (nextIndex < queueRef.current.length) {
         void playQueueTrack(nextIndex);
@@ -1064,75 +1084,127 @@ function App() {
       audio.removeEventListener("durationchange", onMeta);
       audio.removeEventListener("ended", onEnded);
     };
-  }, [playerSource]);
+  }, [isLoggedIn, playerSource]);
 
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return undefined;
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContext) return undefined;
-    const audioCtx = audioContextRef.current || new AudioContext();
-    audioContextRef.current = audioCtx;
-    const analyser = analyserRef.current || audioCtx.createAnalyser();
-    analyser.fftSize = 128;
-    analyser.smoothingTimeConstant = 0.88;
-    analyserRef.current = analyser;
-
-    if (!sourceNodeRef.current) {
-      try {
-        sourceNodeRef.current = audioCtx.createMediaElementSource(audio);
-        sourceNodeRef.current.connect(analyser);
-        analyser.connect(audioCtx.destination);
-      } catch (error) {
-        console.debug("audio analyser unavailable", error?.message || error);
-      }
-    }
-
-    const bins = new Uint8Array(analyser.frequencyBinCount);
     let raf = 0;
+    const startedAt = performance.now();
     const tick = () => {
-      analyser.getByteFrequencyData(bins);
-      const avg = bins.reduce((sum, value) => sum + value, 0) / bins.length / 255;
-      setEnergy(isPlaying ? Math.max(0.08, Math.min(0.72, avg * 1.7)) : 0.08);
+      const elapsed = (performance.now() - startedAt) / 1000;
+      const pulse = 0.18 + Math.sin(elapsed * 2.4) * 0.06 + Math.sin(elapsed * 5.7) * 0.035;
+      setEnergy(isPlaying ? Math.max(0.1, Math.min(0.42, pulse)) : 0.08);
       raf = window.requestAnimationFrame(tick);
     };
     raf = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(raf);
   }, [playerSource, isPlaying]);
 
+  function stopPodcastOverlay() {
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    const podcastAudio = podcastAudioRef.current;
+    if (podcastAudio) {
+      podcastAudio.pause();
+      podcastAudio.removeAttribute("src");
+      podcastAudio.load?.();
+    }
+    if (audioRef.current) audioRef.current.volume = 1;
+  }
+
+  async function startTtsPodcastOverlay(track, token) {
+    if (!track) return;
+    const musicAudio = audioRef.current;
+    const podcastAudio = podcastAudioRef.current;
+    if (!musicAudio || !podcastAudio) {
+      setMessage("播客音频轨道未就绪");
+      return;
+    }
+    try {
+      const response = await fetch("/api/track/tts-podcast", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          track,
+          currentTime: musicAudio.currentTime || 0
+        })
+      });
+      const data = await readJsonResponse(response);
+      if (!response.ok || !data.audioUrl) throw new Error(data.error || "播客语音生成失败");
+      if (token !== playTokenRef.current) return;
+      podcastAudio.src = data.audioUrl;
+      podcastAudio.volume = 1;
+      podcastAudio.onplay = () => {
+        if (token === playTokenRef.current && audioRef.current) audioRef.current.volume = 0.34;
+        const current = audioRef.current?.currentTime || 0;
+        const currentLyric = (data.lyricSegments || []).find((segment) => current >= Number(segment.start || 0) && current < Number(segment.end || Number(segment.start || 0) + 4));
+        setMessage(currentLyric?.text ? `播客接入当前歌词：${currentLyric.text}` : "播客已叠加，音乐保持播放");
+      };
+      podcastAudio.onended = podcastAudio.onerror = () => {
+        if (token === playTokenRef.current && audioRef.current) audioRef.current.volume = 1;
+      };
+      await podcastAudio.play();
+    } catch (error) {
+      console.warn("tts podcast overlay failed:", error?.message || error);
+      if (token === playTokenRef.current) {
+        if (audioRef.current) audioRef.current.volume = 1;
+        setMessage(error.message || "播客语音接入失败，音乐继续播放");
+      }
+    }
+  }
+
   async function playQueueTrack(index) {
     const queue = queueRef.current;
     const track = queue[index];
     if (!track) return;
     const token = ++playTokenRef.current;
+    stopPodcastOverlay();
     queueIndexRef.current = index;
     setQueueIndex(index);
     setSelectedTrack(track);
     setPlayerTitle(track.title || BRAND_CN);
     setPlayerArtist(track.artist || track.playlistName || "podcast mix");
-    setMessage("正在生成播客混音");
+    setMessage("正在准备播放");
 
-    let source = track.podcastAudioUrl || track.outputUrl || "";
-    if (!source) {
-      const response = await fetch("/api/track/podcast", {
+    const playSourceNow = (nextSource, nextMessage = "") => {
+      if (token !== playTokenRef.current || !nextSource) return false;
+      setPlayerSource(nextSource);
+      setMessage(nextMessage);
+      window.setTimeout(() => {
+        if (audioRef.current) audioRef.current.volume = 1;
+        audioRef.current?.load?.();
+        audioRef.current?.play().catch(() => setMessage("点击播放后浏览器才允许出声"));
+      }, 80);
+      return true;
+    };
+
+    const resolveOriginal = async () => {
+      const response = await fetch("/api/music/resolve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ track, prompt: "", voice: "alloy" })
+        body: JSON.stringify({
+          ...track,
+          keyword: track.qqSearchKey || track.musicKeyword || `${track.title || ""} ${track.artist || ""}`.trim()
+        })
       });
       const data = await readJsonResponse(response);
-      if (!response.ok) throw new Error(data.error || "单曲播客生成失败");
-      source = data.podcastAudioUrl || data.outputUrl || "";
-      queue[index] = { ...track, ...data };
-      queueRef.current = [...queue];
-      setTrackQueue([...queue]);
-    }
+      if (!response.ok) throw new Error(data.error || "原曲解析失败");
+      return data.musicUrl || "";
+    };
 
-    if (token !== playTokenRef.current || !source) return;
-    setPlayerSource(source);
-    setMessage("");
-    window.setTimeout(() => {
-      audioRef.current?.play().catch(() => setMessage("点击播放后浏览器才允许出声"));
-    }, 160);
+    try {
+      const originalUrl = track.musicUrl || track.url || await resolveOriginal();
+      const started = playSourceNow(originalUrl, "音乐已播放，正在后台生成播客");
+      if (started) {
+        queue[index] = { ...track, musicUrl: originalUrl };
+        queueRef.current = [...queue];
+        setTrackQueue([...queue]);
+        window.setTimeout(() => {
+          if (token === playTokenRef.current) void startTtsPodcastOverlay({ ...track, musicUrl: originalUrl }, token);
+        }, 1200);
+      }
+    } catch (error) {
+      console.warn("quick original playback failed:", error?.message || error);
+      throw error;
+    }
   }
 
   async function selectSphereTrack(track) {
@@ -1150,8 +1222,9 @@ function App() {
     setHoveredTrack(track);
     setPlayerTitle(track.title || BRAND_CN);
     setPlayerArtist(track.artist || track.playlistName || "song point");
-    queueRef.current = [track];
-    setTrackQueue([track]);
+    const nextQueue = buildPlaybackQueue(track);
+    queueRef.current = nextQueue;
+    setTrackQueue(nextQueue);
     try {
       await playQueueTrack(0);
     } catch (error) {
@@ -1272,26 +1345,29 @@ function App() {
     setLoginOpen(true);
     setLoginProvider("qq");
     setLoginMode("qq-qr");
-    setLoginMessage("点击生成二维码后扫码登录。若 QQ 扫码无法确认，可切换微信扫码或网页导入。");
+    setLoginMessage("正在生成 QQ 音乐二维码。若 QQ 扫码无法确认，可切换微信扫码或网页导入。");
+    window.setTimeout(() => startQqMusicQrLogin(qqQrConfigIndex, "qq"), 0);
   }
 
   function showQqMusicQrPanel() {
     setLoginProvider("qq");
     setLoginMode("qq-qr");
     setQqMusicState((state) => (state ? { ...state, qrSig: "", qrImg: "", qrStatus: "", qrLoginType: "qq" } : state));
-    setLoginMessage("点击生成二维码后，用手机 QQ 扫码。若确认后仍无法完成，请切换微信扫码。");
+    setLoginMessage("正在生成 QQ 扫码二维码。若确认后仍无法完成，请切换微信扫码。");
+    window.setTimeout(() => startQqMusicQrLogin(qqQrConfigIndex, "qq"), 0);
   }
 
   function showQqMusicWxQrPanel() {
     setLoginProvider("qq");
     setLoginMode("qq-wx-qr");
     setQqMusicState((state) => (state ? { ...state, qrSig: "", qrImg: "", qrStatus: "", qrLoginType: "wx" } : state));
-    setLoginMessage("点击生成二维码后，用微信扫码确认 QQ 音乐登录。");
+    setLoginMessage("正在生成微信扫码二维码。");
+    window.setTimeout(() => startQqMusicQrLogin(qqQrConfigIndex, "wx"), 0);
   }
 
-  async function startQqMusicQrLogin(configIndex = qqQrConfigIndex) {
+  async function startQqMusicQrLogin(configIndex = qqQrConfigIndex, forcedLoginType = "") {
     const nextConfigIndex = Number.isFinite(Number(configIndex)) ? Number(configIndex) : qqQrConfigIndex;
-    const loginType = qqQrLoginTypeFromMode(loginMode);
+    const loginType = forcedLoginType || qqQrLoginTypeFromMode(loginMode);
     setLoginBusy(true);
     setLoginMessage("");
     try {
@@ -1390,7 +1466,11 @@ function App() {
     setJumpTrack(track);
     setDeepFocus(true);
     setJumping(true);
-    flash(`正在贴近 ${track.title || "目标星点"}，点击中心星点后播放`);
+    const nextQueue = buildPlaybackQueue(track);
+    queueRef.current = nextQueue;
+    setTrackQueue(nextQueue);
+    void playQueueTrack(0).catch((error) => setMessage(error.message || "播放失败"));
+    flash(`正在播放 ${track.title || "目标星点"}`);
     window.clearTimeout(playTrackFromUi.timer);
     playTrackFromUi.timer = window.setTimeout(() => setJumping(false), 3200);
   }
@@ -1512,7 +1592,7 @@ function App() {
           {BRAND_CN} <span className="title-en">{BRAND_EN}</span>
         </div>
         <div className="seg">
-          {["歌手", "播客", "歌单", "封面", "年代"].map((mode) => (
+          {["歌手", "歌单", "封面", "年代"].map((mode) => (
             <button key={mode} className={`seg-btn ${viewMode === mode ? "on" : ""}`} onClick={() => selectViewMode(mode)} type="button">
               {mode}
             </button>
@@ -1645,11 +1725,13 @@ function App() {
               {isQqQrLoginMode(loginMode) ? (
                 <div className="qr-login">
                   <div className="qr-box">
-                    {qqMusicState?.qrImg ? <img src={qqMusicState.qrImg} alt="QQ 音乐登录二维码" /> : <span>{loginBusy ? "生成中" : "点击刷新二维码"}</span>}
+                    {qqMusicState?.qrImg ? <img src={qqMusicState.qrImg} alt="QQ 音乐登录二维码" /> : <span>{loginBusy ? "生成中" : "二维码生成中"}</span>}
                   </div>
-                  <button className="login-action" type="button" onClick={() => startQqMusicQrLogin()} disabled={loginBusy}>
-                    {qqMusicState?.qrImg ? "刷新二维码" : `生成${loginMode === "qq-wx-qr" ? "微信" : "QQ"}二维码`}
-                  </button>
+                  {qqMusicState?.qrImg && (
+                    <button className="login-action" type="button" onClick={() => startQqMusicQrLogin()} disabled={loginBusy}>
+                      刷新二维码
+                    </button>
+                  )}
                 </div>
               ) : (
                 <form className="phone-login qq-cookie-login" onSubmit={loginWithQqCookie}>
@@ -1669,11 +1751,13 @@ function App() {
               {loginMode === "qr" ? (
                 <div className="qr-login">
                   <div className="qr-box">
-                    {neteaseState?.qrImg ? <img src={neteaseState.qrImg} alt="网易云登录二维码" /> : <span>{loginBusy ? "生成中" : "点击刷新二维码"}</span>}
+                    {neteaseState?.qrImg ? <img src={neteaseState.qrImg} alt="网易云登录二维码" /> : <span>{loginBusy ? "生成中" : "二维码生成中"}</span>}
                   </div>
-                  <button className="login-action" type="button" onClick={() => openLoginPanel("qr")} disabled={loginBusy}>
-                    {neteaseState?.qrImg ? "刷新二维码" : "生成二维码"}
-                  </button>
+                  {neteaseState?.qrImg && (
+                    <button className="login-action" type="button" onClick={() => openLoginPanel("qr")} disabled={loginBusy}>
+                      刷新二维码
+                    </button>
+                  )}
                 </div>
               ) : (
                 <form className="phone-login" onSubmit={loginWithPhone}>
@@ -1732,7 +1816,7 @@ function App() {
               <span className="meta-k">歌曲编号</span>
               <span className="meta-v idx full">{String(displayTrack.id || trackKey(displayTrack))}</span>
             </div>
-            <div className="poem-foot">点击歌星后生成播客混音；播客不报主持人名，只讲歌曲与场景本身。</div>
+            <div className="poem-foot">点击歌星后播放音乐，并接入实时播客；播客不报主持人名，只讲歌曲与场景本身。</div>
             <div className="poem-share">
               <button className="copy-btn share" type="button" onClick={shareTrack}>分享</button>
               <button className="copy-btn" type="button" onClick={saveSnapshot}>留影</button>
@@ -1756,12 +1840,13 @@ function App() {
 
       {!uiHidden && (
       <footer className="hud-bottom">
-        <span className="hint">搜索跃迁定位 · 拖拽旋转 · <b>点击歌星</b>生成播客混音</span>
+        <span className="hint">搜索跃迁定位 · 拖拽旋转 · <b>点击歌星</b>播放音乐与播客</span>
         <span className="speed">{jumping ? "速度 ×1.49 · 星系跃迁中" : deepFocus ? `近距离锁定 · ${jumpTrack?.title || "目标星点"}` : `${isPlaying ? "正在播放" : message || "待命"} · ${formatTime(audioTime)}`}</span>
       </footer>
       )}
 
-      {playerSource && <audio ref={audioRef} src={playerSource} preload="auto" />}
+      <audio ref={audioRef} src={playerSource || undefined} preload="auto" />
+      <audio ref={podcastAudioRef} preload="auto" />
     </main>
   );
 }

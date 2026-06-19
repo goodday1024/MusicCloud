@@ -5,6 +5,8 @@ import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import net from "node:net";
+import tls from "node:tls";
 import { nanoid } from "nanoid";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -110,6 +112,217 @@ function rateLimit({ key, limit = 25, windowMs = 60_000 }) {
   return true;
 }
 
+function encodeWebSocketFrame(text) {
+  const payload = Buffer.from(text);
+  const length = payload.length;
+  const headerLength = length < 126 ? 6 : length < 65536 ? 8 : 14;
+  const frame = Buffer.allocUnsafe(headerLength + length);
+  frame[0] = 0x81;
+  if (length < 126) {
+    frame[1] = 0x80 | length;
+    crypto.randomBytes(4).copy(frame, 2);
+    for (let index = 0; index < length; index += 1) frame[6 + index] = payload[index] ^ frame[2 + (index % 4)];
+    return frame;
+  }
+  if (length < 65536) {
+    frame[1] = 0x80 | 126;
+    frame.writeUInt16BE(length, 2);
+    crypto.randomBytes(4).copy(frame, 4);
+    for (let index = 0; index < length; index += 1) frame[8 + index] = payload[index] ^ frame[4 + (index % 4)];
+    return frame;
+  }
+  frame[1] = 0x80 | 127;
+  frame.writeBigUInt64BE(BigInt(length), 2);
+  crypto.randomBytes(4).copy(frame, 10);
+  for (let index = 0; index < length; index += 1) frame[14 + index] = payload[index] ^ frame[10 + (index % 4)];
+  return frame;
+}
+
+function extractRealtimeText(event) {
+  const type = event?.type || "";
+  if (type === "response.text.delta" || type === "response.output_text.delta" || type === "response.audio_transcript.delta") {
+    return event.delta || "";
+  }
+  if (type === "response.text.done" || type === "response.output_text.done" || type === "response.audio_transcript.done") {
+    return event.text || event.transcript || "";
+  }
+  if (type === "response.output_item.done") {
+    return (event.item?.content || [])
+      .map((part) => part.text || part.transcript || "")
+      .filter(Boolean)
+      .join("");
+  }
+  if (type === "response.done") {
+    return (event.response?.output || [])
+      .flatMap((item) => item.content || [])
+      .map((part) => part.text || part.transcript || "")
+      .filter(Boolean)
+      .join("");
+  }
+  return "";
+}
+
+async function createRealtimePodcastText({ wsUrl, apiKey, instructions, timeoutMs = 24000 }) {
+  const target = new URL(wsUrl);
+  const secure = target.protocol === "wss:";
+  const port = Number(target.port || (secure ? 443 : 80));
+  const host = target.hostname;
+  const pathWithSearch = `${target.pathname || "/"}${target.search || ""}`;
+  const key = crypto.randomBytes(16).toString("base64");
+  const socket = secure
+    ? tls.connect({ host, port, servername: host })
+    : net.connect({ host, port });
+
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let handshakeComplete = false;
+    let buffer = Buffer.alloc(0);
+    let output = "";
+    let fragments = [];
+    const finish = (error, value = "") => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      if (error) reject(error);
+      else resolve(cleanText(value || output, 2200));
+    };
+    const timer = setTimeout(() => finish(new Error("Realtime WebSocket 连接超时")), timeoutMs);
+
+    const sendHandshake = () => {
+      socket.write([
+        `GET ${pathWithSearch} HTTP/1.1`,
+        `Host: ${target.host}`,
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        `Sec-WebSocket-Key: ${key}`,
+        "Sec-WebSocket-Version: 13",
+        `Authorization: Bearer ${apiKey}`,
+        "OpenAI-Beta: realtime=v1",
+        "\r\n"
+      ].join("\r\n"));
+    };
+
+    if (secure) socket.once("secureConnect", sendHandshake);
+    else socket.once("connect", sendHandshake);
+
+    socket.on("error", (error) => finish(new Error(`Realtime WebSocket 连接失败：${error.message}`)));
+    socket.on("end", () => {
+      if (!settled && output) finish(null, output);
+      else if (!settled) finish(new Error("Realtime WebSocket 连接已关闭"));
+    });
+
+    socket.on("data", (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (!handshakeComplete) {
+        const split = buffer.indexOf("\r\n\r\n");
+        if (split === -1) return;
+        const head = buffer.slice(0, split).toString("utf8");
+        buffer = buffer.slice(split + 4);
+        if (!/^HTTP\/1\.[01] 101\b/.test(head)) {
+          finish(new Error(`Realtime WebSocket 握手失败：${head.split("\r\n")[0] || "未知响应"}`));
+          return;
+        }
+        handshakeComplete = true;
+        socket.write(encodeWebSocketFrame(JSON.stringify({
+          type: "response.create",
+          response: {
+            modalities: ["text"],
+            instructions
+          }
+        })));
+      }
+
+      while (buffer.length >= 2) {
+        const first = buffer[0];
+        const second = buffer[1];
+        const fin = Boolean(first & 0x80);
+        const opcode = first & 0x0f;
+        const masked = Boolean(second & 0x80);
+        let length = second & 0x7f;
+        let offset = 2;
+        if (length === 126) {
+          if (buffer.length < offset + 2) return;
+          length = buffer.readUInt16BE(offset);
+          offset += 2;
+        } else if (length === 127) {
+          if (buffer.length < offset + 8) return;
+          const bigLength = buffer.readBigUInt64BE(offset);
+          if (bigLength > BigInt(Number.MAX_SAFE_INTEGER)) {
+            finish(new Error("Realtime WebSocket 消息过大"));
+            return;
+          }
+          length = Number(bigLength);
+          offset += 8;
+        }
+        const maskOffset = offset;
+        if (masked) offset += 4;
+        if (buffer.length < offset + length) return;
+        let payload = buffer.slice(offset, offset + length);
+        if (masked) {
+          const mask = buffer.slice(maskOffset, maskOffset + 4);
+          payload = Buffer.from(payload.map((byte, index) => byte ^ mask[index % 4]));
+        }
+        buffer = buffer.slice(offset + length);
+
+        if (opcode === 0x8) {
+          if (output) finish(null, output);
+          else finish(new Error("Realtime WebSocket 被服务端关闭"));
+          return;
+        }
+        if (opcode === 0x9) {
+          socket.write(Buffer.from([0x8a, 0x00]));
+          continue;
+        }
+        if (opcode !== 0x1 && opcode !== 0x0) continue;
+        fragments.push(payload);
+        if (!fin) continue;
+        const message = Buffer.concat(fragments).toString("utf8");
+        fragments = [];
+        let event;
+        try {
+          event = JSON.parse(message);
+        } catch (_error) {
+          continue;
+        }
+        if (event.type === "error") {
+          finish(new Error(event.error?.message || "Realtime 返回错误"));
+          return;
+        }
+        const eventText = extractRealtimeText(event);
+        if (event.type === "response.done" && output) {
+          // Delta events usually already contain the full answer; avoid appending
+          // the final aggregate again when relays include it on response.done.
+        } else {
+          output += eventText;
+        }
+        if (event.type === "response.done") {
+          finish(null, output);
+          return;
+        }
+      }
+    });
+  });
+}
+
+function buildRealtimeWebSocketUrls(baseUrl, model) {
+  const base = new URL(baseUrl);
+  const pathname = base.pathname.replace(/\/$/, "");
+  const query = `model=${encodeURIComponent(model)}`;
+  const candidates = [];
+  const add = (protocol) => {
+    const url = `${protocol}//${base.host}${pathname}/realtime?${query}`;
+    if (!candidates.includes(url)) candidates.push(url);
+  };
+  if (process.env.OPENAI_REALTIME_WS_URL) {
+    candidates.push(process.env.OPENAI_REALTIME_WS_URL.replace(/\{model\}/g, encodeURIComponent(model)));
+  }
+  if (base.hostname === "yunwu.ai") add("ws:");
+  add(base.protocol === "http:" ? "ws:" : "wss:");
+  add(base.protocol === "http:" ? "wss:" : "ws:");
+  return candidates;
+}
+
 await Promise.all([mkdir(uploadDir, { recursive: true }), mkdir(generatedDir, { recursive: true }), mkdir(dataDir, { recursive: true })]);
 
 const app = express();
@@ -124,6 +337,13 @@ const ttsOpenai = new OpenAI({
   baseURL: process.env.OPENAI_TTS_BASE_URL || process.env.OPENAI_BASE_URL || undefined
 });
 const neteaseApi = NeteaseCloudMusicApi;
+const realtimeModel = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2025-08-28";
+const configuredRealtimeBaseUrl = (process.env.OPENAI_REALTIME_BASE_URL || process.env.OPENAI_BASE_URL || "").trim();
+const realtimeBaseUrl = /^https?:\/\//i.test(configuredRealtimeBaseUrl)
+  ? configuredRealtimeBaseUrl.replace(/\/$/, "")
+  : "https://api.openai.com/v1";
+const realtimeApiKey = process.env.OPENAI_REALTIME_API_KEY || process.env.OPENAI_API_KEY || "";
+const realtimeDirectSdp = !/^(0|false|no)$/i.test(process.env.OPENAI_REALTIME_DIRECT_SDP || (realtimeBaseUrl.includes("api.openai.com") ? "false" : "true"));
 
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -136,12 +356,11 @@ app.use(
   cors(
     process.env.CORS_ORIGIN
       ? { origin: process.env.CORS_ORIGIN.split(",").map((item) => item.trim()).filter(Boolean), credentials: true }
-      : { origin: false }
+      : { origin: [/^http:\/\/localhost:517\d$/, /^http:\/\/127\.0\.0\.1:517\d$/], credentials: true }
   )
 );
 app.use(express.json({ limit: "2mb" }));
 app.use("/media", express.static(generatedDir));
-app.use(express.static(path.join(rootDir, "dist")));
 
 const defaultMemory = {
   profile: {
@@ -1795,6 +2014,14 @@ async function fetchLyrics({ id, platform }) {
   } catch (e) {
     return [];
   }
+}
+
+function lyricAtTime(segments = [], currentTime = 0) {
+  const time = Number(currentTime || 0);
+  if (!Array.isArray(segments) || !segments.length || !Number.isFinite(time)) return null;
+  return segments.find((segment) => time >= Number(segment.start || 0) && time < Number(segment.end || Number(segment.start || 0) + 4))
+    || [...segments].reverse().find((segment) => Number(segment.start || 0) <= time)
+    || null;
 }
 
 function parseJsonFromModel(text) {
@@ -3702,6 +3929,12 @@ app.get("/api/config", (_req, res) => {
     voice: process.env.OPENAI_TTS_VOICE || "alloy",
     hasOpenAIKey: Boolean(process.env.OPENAI_API_KEY),
     hasTTSKey: Boolean(process.env.OPENAI_TTS_API_KEY || process.env.OPENAI_API_KEY),
+    hasRealtimeKey: Boolean(realtimeApiKey),
+    realtimeModel,
+    realtimeBaseUrl,
+    realtimeDirectSdp,
+    realtimeRoute: "/api/realtime/podcast-text",
+    realtimeWebSocketUrls: buildRealtimeWebSocketUrls(realtimeBaseUrl, realtimeModel),
     openaiBaseUrl: process.env.OPENAI_BASE_URL || "",
     ttsBaseUrl: process.env.OPENAI_TTS_BASE_URL || process.env.OPENAI_BASE_URL || "",
     homepodShortcutConfigured: Boolean(process.env.HOMEPOD_SHORTCUT_NAME),
@@ -4091,6 +4324,104 @@ app.post("/api/music/resolve", async (req, res, next) => {
   }
 });
 
+app.post("/api/realtime/session", async (req, res, next) => {
+  try {
+    if (!realtimeApiKey || realtimeApiKey === "missing-key") {
+      res.status(400).json({ error: "缺少 OPENAI_API_KEY 或 OPENAI_REALTIME_API_KEY" });
+      return;
+    }
+    if (realtimeDirectSdp) {
+      res.json({
+        model: realtimeModel,
+        baseUrl: realtimeBaseUrl,
+        clientSecret: realtimeApiKey,
+        directSdp: true,
+        expiresAt: null
+      });
+      return;
+    }
+    const voice = sanitizeVoice(req.body?.voice || process.env.OPENAI_REALTIME_VOICE || "alloy");
+    const payload = {
+      session: {
+        type: "realtime",
+        model: realtimeModel,
+        audio: { output: { voice } },
+        instructions:
+          "你是云韶的实时音乐播客声音。用户点击歌曲后，音乐会同时播放。你只说一段自然中文播客，不要说主持人名，不要报幕，不要编号，不要等待用户回复。内容要介绍歌曲和适合的情绪场景，控制在 25 到 45 秒。"
+      }
+    };
+    const headers = {
+      Authorization: `Bearer ${realtimeApiKey}`,
+      "Content-Type": "application/json"
+    };
+    let response = await fetch(`${realtimeBaseUrl}/realtime/client_secrets`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload)
+    });
+    let data = await response.json().catch(() => ({}));
+    if (!response.ok && (response.status === 404 || response.status === 400)) {
+      response = await fetch(`${realtimeBaseUrl}/realtime/sessions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: realtimeModel,
+          voice,
+          modalities: ["audio", "text"],
+          instructions: payload.session.instructions
+        })
+      });
+      data = await response.json().catch(() => ({}));
+    }
+    if (!response.ok) {
+      const upstreamMessage = data.error?.message || data.message || "Realtime 会话创建失败";
+      const proxyHint = realtimeBaseUrl.includes("api.openai.com")
+        ? ""
+        : "当前 OPENAI_REALTIME_BASE_URL/OPENAI_BASE_URL 可能不支持 OpenAI Realtime WebRTC，请改用支持 Realtime 的地址，或设置 OPENAI_REALTIME_BASE_URL=https://api.openai.com/v1。";
+      res.status(response.status).json({ error: [upstreamMessage, proxyHint].filter(Boolean).join(" ") });
+      return;
+    }
+    res.json({
+      model: realtimeModel,
+      baseUrl: realtimeBaseUrl,
+      clientSecret: data.value || data.client_secret?.value || data.client_secret || "",
+      expiresAt: data.expires_at || data.client_secret?.expires_at || null
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/realtime/podcast-text", async (req, res, next) => {
+  try {
+    if (!realtimeApiKey || realtimeApiKey === "missing-key") {
+      res.status(400).json({ error: "缺少 OPENAI_API_KEY 或 OPENAI_REALTIME_API_KEY" });
+      return;
+    }
+    const track = normalizeSearchItem(req.body?.track || req.body || {}, req.body?.platform || "netease");
+    const title = cleanText(track.title || req.body?.title || "这首歌", 80);
+    const artist = cleanText(track.artist || req.body?.artist || "未知艺人", 80);
+    const album = cleanText(track.album || req.body?.album || req.body?.playlistName || "", 80);
+    const instructions = `音乐已经开始播放。请用中文写一段适合直接朗读的音乐播客，25 到 45 秒，只说一遍，不要报主持人名，不要编号，不要使用 Markdown。歌曲：${title}。艺人：${artist}。${album ? `专辑或歌单：${album}。` : ""}请介绍它适合的情绪、场景和听感。`;
+    const wsUrls = buildRealtimeWebSocketUrls(realtimeBaseUrl, realtimeModel);
+    let text = "";
+    let lastError = null;
+    for (const wsUrl of wsUrls) {
+      try {
+        text = await createRealtimePodcastText({ wsUrl, apiKey: realtimeApiKey, instructions });
+        break;
+      } catch (error) {
+        lastError = error;
+        console.warn(`Realtime WebSocket failed for ${wsUrl.replace(/key=[^&]+/g, "key=***")}:`, error.message);
+      }
+    }
+    if (!text && lastError) throw lastError;
+    res.json({ text: text || "这首歌已经开始。先把注意力放松下来，让旋律自己把场景打开。" });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/music/candidates", async (req, res, next) => {
   try {
     const keyword = String(req.query.keyword || "").trim();
@@ -4448,6 +4779,57 @@ app.post("/api/agent/intent", async (req, res, next) => {
   }
 });
 
+app.post("/api/track/tts-podcast", async (req, res, next) => {
+  try {
+    const rawTrack = req.body?.track || req.body || {};
+    const track = normalizeTrackItem(rawTrack);
+    track.platform = inferMusicPlatform(rawTrack, rawTrack.platform || track.platform || defaultMusicPlatform);
+    track.musicUrl = rawTrack.musicUrl || rawTrack.url || "";
+    track.mediaId = rawTrack.mediaId || rawTrack.media_mid || rawTrack.raw?.strMediaMid || rawTrack.raw?.media_mid || "";
+    track.qqSearchKey = rawTrack.qqSearchKey || rawTrack.raw?.qqSearchKey || "";
+    track.playlistName = rawTrack.playlistName || "";
+    if (!track.id && !track.title) {
+      res.status(400).json({ error: "缺少歌曲信息" });
+      return;
+    }
+
+    const prompt = String(req.body?.prompt || "").trim();
+    const voice = String(req.body?.voice || process.env.OPENAI_TTS_VOICE || "alloy").trim();
+    const currentTime = Number(req.body?.currentTime || 0) || 0;
+    const memory = await readMemory();
+    const cookie = cookieHeaderFromState(await readNeteaseState().catch(() => null));
+    const songPackage = await buildSongPodcastPackage(track, cookie);
+    const lyricSegments = await fetchLyrics({ id: track.id, platform: track.platform }).catch(() => []);
+    const currentLyric = lyricAtTime(lyricSegments, currentTime);
+    const transitionPrompt = [
+      prompt,
+      currentLyric?.text
+        ? `音乐已经播放到 ${Math.round(currentTime)} 秒，当前歌词是“${currentLyric.text}”。播客第一句要自然接住这句歌词的情绪，不要生硬引用时间。`
+        : `音乐已经播放到 ${Math.round(currentTime)} 秒，请用自然电台口吻在音乐中段切入。`
+    ].filter(Boolean).join("\n");
+    const podcastScript = await buildSongPodcastScript({
+      prompt: transitionPrompt,
+      track: { ...track, duration: songPackage.duration || track.duration },
+      songPackage,
+      memory
+    });
+    const voicePath = await createSpeech(podcastScript.script, voice);
+    const fileName = path.basename(voicePath);
+    const audioUrl = await publishGeneratedFile(voicePath, fileName);
+    res.json({
+      ok: true,
+      audioUrl,
+      script: podcastScript.script,
+      podcastScript,
+      lyricSegments,
+      currentLyric,
+      startedAt: currentTime
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/track/podcast", async (req, res, next) => {
   try {
     const track = normalizeTrackItem(req.body?.track || req.body || {});
@@ -4494,6 +4876,8 @@ app.post("/api/homepod/play", async (req, res, next) => {
     next(error);
   }
 });
+
+app.use(express.static(path.join(rootDir, "dist")));
 
 app.get("*", (_req, res) => {
   res.sendFile(path.join(rootDir, "dist", "index.html"));
