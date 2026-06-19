@@ -70,11 +70,30 @@ function clampInt(value, min, max, fallback = min) {
   return Math.min(max, Math.max(min, num));
 }
 
+const maxLibraryPlaylists = clampInt(process.env.MUSIC_LIBRARY_MAX_PLAYLISTS, 4, 80, 24);
+const maxLibraryTracksPerPlaylist = clampInt(process.env.MUSIC_LIBRARY_MAX_TRACKS_PER_PLAYLIST, 20, 500, 120);
+const libraryPlaylistConcurrency = clampInt(process.env.MUSIC_LIBRARY_PLAYLIST_CONCURRENCY, 1, 8, 3);
+
 function cleanText(value, maxLen = 240) {
   return String(value || "")
     .replace(/\0/g, "")
     .trim()
     .slice(0, maxLen);
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const list = Array.isArray(items) ? items : [];
+  const results = new Array(list.length);
+  let cursor = 0;
+  const workerCount = Math.min(Math.max(1, limit), list.length || 1);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (cursor < list.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await mapper(list[index], index);
+    }
+  }));
+  return results;
 }
 
 function sanitizeVoice(value) {
@@ -3682,10 +3701,13 @@ app.get("/api/netease/playlist/:id/tracks", async (req, res, next) => {
 app.get("/api/netease/library/tracks", async (req, res, next) => {
   try {
     const playlists = await fetchNeteasePlaylists(req);
-    const groups = await Promise.all(
-      playlists.map(async (playlist) => {
+    const activePlaylists = playlists.slice(0, maxLibraryPlaylists);
+    const groups = await mapWithConcurrency(
+      activePlaylists,
+      libraryPlaylistConcurrency,
+      async (playlist) => {
         const tracks = await fetchNeteasePlaylistTracks(playlist.id, req).catch(() => []);
-        return tracks.map((track, index) => ({
+        return tracks.slice(0, maxLibraryTracksPerPlaylist).map((track, index) => ({
           ...track,
           cover: track.cover || playlist.cover || "",
           year: track.year || (track.publishTime ? new Date(Number(track.publishTime)).getFullYear() : ""),
@@ -3694,11 +3716,14 @@ app.get("/api/netease/library/tracks", async (req, res, next) => {
           playlistName: playlist.name,
           playlistDescription: playlist.description || ""
         }));
-      })
+      }
     );
     res.json({
       playlists,
-      items: groups.flat()
+      items: groups.flat(),
+      limited: playlists.length > activePlaylists.length,
+      playlistLimit: maxLibraryPlaylists,
+      trackLimit: maxLibraryTracksPerPlaylist
     });
   } catch (error) {
     res.status(200).json({
@@ -3785,10 +3810,13 @@ app.get("/api/qqmusic/playlist/:id/tracks", async (req, res, next) => {
 app.get("/api/qqmusic/library/tracks", async (req, res, next) => {
   try {
     const playlists = await fetchQQMusicPlaylists(req);
-    const groups = await Promise.all(
-      playlists.map(async (playlist) => {
+    const activePlaylists = playlists.slice(0, maxLibraryPlaylists);
+    const groups = await mapWithConcurrency(
+      activePlaylists,
+      libraryPlaylistConcurrency,
+      async (playlist) => {
         const tracks = await fetchQQMusicPlaylistTracks(playlist.id, req).catch(() => []);
-        return tracks.map((track, index) => ({
+        return tracks.slice(0, maxLibraryTracksPerPlaylist).map((track, index) => ({
           ...track,
           cover: track.cover || playlist.cover || "",
           libraryKey: `qq:${playlist.id}:${track.id || track.songId || index}:${index}`,
@@ -3796,11 +3824,14 @@ app.get("/api/qqmusic/library/tracks", async (req, res, next) => {
           playlistName: playlist.name,
           playlistDescription: playlist.description || ""
         }));
-      })
+      }
     );
     res.json({
       playlists,
-      items: groups.flat()
+      items: groups.flat(),
+      limited: playlists.length > activePlaylists.length,
+      playlistLimit: maxLibraryPlaylists,
+      trackLimit: maxLibraryTracksPerPlaylist
     });
   } catch (error) {
     res.status(200).json({

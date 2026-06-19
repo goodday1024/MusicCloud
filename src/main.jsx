@@ -5,6 +5,8 @@ import "./styles.css";
 
 const BRAND_CN = "云韶";
 const BRAND_EN = "CaelumShao";
+const MAX_RENDER_TRACKS = 900;
+const MAX_DUST_POINTS = 16000;
 
 function trackKey(track) {
   if (!track) return "";
@@ -93,6 +95,25 @@ function sortVisibleTracks(list, sortMode) {
     next.sort((a, b) => trackPopularity(b) - trackPopularity(a) || withName(a, b));
   }
   return next;
+}
+
+function pickRenderTracks(list, selectedKey = "") {
+  if (!Array.isArray(list) || list.length <= MAX_RENDER_TRACKS) return list || [];
+  const selectedIndex = selectedKey ? list.findIndex((track) => trackKey(track) === selectedKey) : -1;
+  const picked = [];
+  const seen = new Set();
+  if (selectedIndex >= 0) {
+    picked.push(list[selectedIndex]);
+    seen.add(selectedIndex);
+  }
+  const step = list.length / Math.max(1, MAX_RENDER_TRACKS - picked.length);
+  for (let cursor = 0; picked.length < MAX_RENDER_TRACKS && Math.floor(cursor) < list.length; cursor += step) {
+    const index = Math.floor(cursor);
+    if (seen.has(index)) continue;
+    picked.push(list[index]);
+    seen.add(index);
+  }
+  return picked;
 }
 
 function fibonacciSphere(index, count, radius) {
@@ -189,6 +210,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     let trackCloud = null;
     let dust = null;
     let positions = [];
+    let renderList = [];
     let activeId = -1;
     let hoverId = -1;
     let hasFocus = false;
@@ -338,14 +360,16 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     };
 
     const updateInstances = () => {
-      const list = tracksRef.current.length
-        ? tracksRef.current
+      const sourceTracks = tracksRef.current.length
+        ? pickRenderTracks(tracksRef.current, selectedKeyRef.current)
         : Array.from({ length: 220 }, (_, index) => ({
             title: "等待曲库",
             artist: BRAND_CN,
             libraryKey: `placeholder-${index}`,
             placeholder: true
           }));
+      const list = sourceTracks;
+      renderList = list;
 
       if (trackCloud) {
         group.remove(trackCloud);
@@ -361,7 +385,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
         return galaxyPoint(index, Math.max(list.length, 1), seed);
       });
 
-      const dustCount = Math.max(18000, Math.min(42000, list.length * 42));
+      const dustCount = Math.max(5000, Math.min(MAX_DUST_POINTS, list.length * 18));
       const dustPositions = new Float32Array(dustCount * 3);
       const dustColors = new Float32Array(dustCount * 3);
       const palette = [0xffd27a, 0xf05aa8, 0x48d69a, 0xf26a32, 0xa7b6ff, 0xffffff];
@@ -447,14 +471,13 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     const setHover = (nextId) => {
       if (nextId === hoverId) return;
       hoverId = Number.isFinite(nextId) ? nextId : -1;
-      updateInstances();
-      const track = hoverId >= 0 ? tracksRef.current[hoverId] : null;
+      const track = hoverId >= 0 ? renderList[hoverId] : null;
       host.classList.toggle("has-hover", Boolean(track && !track.placeholder));
       onHoverRef.current?.(track && !track.placeholder ? track : null);
     };
 
     const selectInstance = (instanceId) => {
-      const track = tracksRef.current[instanceId];
+      const track = renderList[instanceId];
       if (!track || track.placeholder) return;
       activeId = instanceId;
       selectedKeyRef.current = trackKey(track);
@@ -592,6 +615,7 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [energy, setEnergy] = useState(0.08);
   const [message, setMessage] = useState("");
+  const [isLibraryLoading, setIsLibraryLoading] = useState(false);
   const [viewMode, setViewMode] = useState("歌星");
   const [sortMode, setSortMode] = useState("热门");
   const [searchMode, setSearchMode] = useState("歌曲");
@@ -626,6 +650,7 @@ function App() {
   const queueRef = useRef([]);
   const queueIndexRef = useRef(-1);
   const playTokenRef = useRef(0);
+  const libraryLoadRef = useRef(0);
 
   const isNeteaseLoggedIn = Boolean(neteaseState?.loggedIn);
   const isQqMusicLoggedIn = Boolean(qqMusicState?.loggedIn);
@@ -688,13 +713,19 @@ function App() {
   }
 
   async function loadAllLibraries() {
+    const token = libraryLoadRef.current + 1;
+    libraryLoadRef.current = token;
+    setIsLibraryLoading(true);
     const [neteaseItems, qqItems] = await Promise.all([
       loadNeteaseLibrary().catch(() => []),
       loadQqMusicLibrary().catch(() => [])
     ]);
+    if (token !== libraryLoadRef.current) return [];
     const merged = [...neteaseItems, ...qqItems];
     setLibraryTracks(merged);
     if (!merged.length) setMessage("还没有载入曲库，请先登录网易云或 QQ 音乐");
+    else setMessage("");
+    setIsLibraryLoading(false);
     return merged;
   }
 
@@ -719,6 +750,7 @@ function App() {
   useEffect(() => {
     loadAllLibraries().catch(() => {
       setLibraryTracks([]);
+      setIsLibraryLoading(false);
       setMessage("曲库暂时没有载入");
     });
   }, [isNeteaseLoggedIn, isQqMusicLoggedIn]);
@@ -1243,7 +1275,7 @@ function App() {
             {mode}
           </button>
         ))}
-        <span className="stat">{playlistCount || 0} 歌单 · {libraryTracks.length || 0} 首</span>
+        <span className="stat">{isLibraryLoading ? "同步曲库中" : `${playlistCount || 0} 歌单 · ${libraryTracks.length || 0} 首`}</span>
         <div className="login-actions">
           {isNeteaseLoggedIn ? (
             <div className="login-chip">
