@@ -520,8 +520,9 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
         if (!globalModeRef.current) return galaxyPoint(index, Math.max(list.length, 1), seed);
         if (track.artistCenter) {
           const centerIndex = [...artistCenters.keys()].indexOf(track.artistGroupKey);
+          const artistSeed = String(track.artistGroupKey || track.title || seed).split("").reduce((sum, ch) => sum + ch.charCodeAt(0) * 17, 0);
           const center = artistCenters.size === 1
-            ? new THREE.Vector3(0, 0, 0)
+            ? galaxyPoint(artistSeed % 997, 997, artistSeed).multiplyScalar(0.58)
             : galaxyPoint(centerIndex, Math.max(artistCenters.size, 1), seed).multiplyScalar(0.92);
           artistCenters.set(track.artistGroupKey, center);
           return center;
