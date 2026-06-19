@@ -2218,6 +2218,131 @@ async function searchMusicsquareQQ({ keyword, count = 10 }) {
   return normalizeMusicsquareTangQQSearchResponse(payload, keyword).slice(0, count);
 }
 
+async function searchMusicsquareNetease({ keyword, count = 10 }) {
+  const url = new URL("https://api.qijieya.cn/meting/");
+  url.searchParams.set("type", "search");
+  url.searchParams.set("id", keyword);
+  url.searchParams.set("limit", String(count));
+  url.searchParams.set("server", "netease");
+  const payload = await fetchJsonWithTimeout(url);
+  const list = Array.isArray(payload) ? payload : [];
+  return list.map((item, sourceIndex) => {
+    let id = "";
+    try {
+      id = new URL(item.url || "", "https://api.qijieya.cn").searchParams.get("id") || "";
+    } catch (_error) {}
+    return normalizeSearchItem({
+      ...item,
+      id,
+      title: item.name,
+      artist: item.artist,
+      cover: item.pic,
+      url: item.url || "",
+      sourceIndex
+    }, "netease");
+  }).filter((item) => item.id || item.url);
+}
+
+async function searchMusicsquareKuwo({ keyword, count = 10 }) {
+  const url = new URL("https://kw-api.cenguigui.cn/");
+  url.searchParams.set("name", keyword);
+  url.searchParams.set("page", "1");
+  url.searchParams.set("limit", String(count));
+  const payload = await fetchJsonWithTimeout(url);
+  const list = Array.isArray(payload?.data) ? payload.data : [];
+  return list.map((item, sourceIndex) => normalizeSearchItem({
+    ...item,
+    id: item.rid,
+    title: item.name,
+    artist: item.artist,
+    album: item.album,
+    cover: item.pic,
+    sourceIndex
+  }, "kuwo")).filter((item) => item.id || item.url);
+}
+
+async function searchMusicsquareThirdParty({ keyword, platform, count = 10 }) {
+  if (platform === "qq") return searchMusicsquareQQ({ keyword, count });
+  if (platform === "netease") return searchMusicsquareNetease({ keyword, count });
+  if (platform === "kuwo") return searchMusicsquareKuwo({ keyword, count });
+  return [];
+}
+
+function normalizeArtistName(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[·・.。]/g, "")
+    .trim();
+}
+
+function primarySearchArtist(item) {
+  return String(item?.artist || item?.singer || "未知艺人").split(/[\/,&、，;；]/)[0].trim();
+}
+
+function artistMatchesKeyword(item, keyword) {
+  const artist = normalizeArtistName(item?.artist || item?.singer || primarySearchArtist(item));
+  const target = normalizeArtistName(keyword);
+  return Boolean(target && (artist.includes(target) || target.includes(artist)));
+}
+
+async function searchNeteaseArtistCatalog(keyword, count) {
+  const artistResp = await neteaseApi.cloudsearch({
+    keywords: keyword,
+    type: 100,
+    limit: 6,
+    offset: 0
+  }).catch((error) => {
+    console.warn("netease artist cloudsearch failed:", error.message);
+    return null;
+  });
+  const artists = artistResp?.body?.result?.artists || [];
+  const target = normalizeArtistName(keyword);
+  const artist = artists.find((item) => normalizeArtistName(item.name) === target) || artists.find((item) => normalizeArtistName(item.name).includes(target) || target.includes(normalizeArtistName(item.name))) || artists[0];
+  if (!artist?.id) return [];
+  const songsResp = await neteaseApi.artist_songs({
+    id: artist.id,
+    order: "hot",
+    limit: Math.min(100, Math.max(count, 60)),
+    offset: 0
+  }).catch((error) => {
+    console.warn("netease artist_songs failed:", error.message);
+    return null;
+  });
+  const songs = songsResp?.body?.songs || songsResp?.body?.data?.songs || [];
+  return songs.map((item, sourceIndex) => normalizeSearchItem({
+    ...item,
+    sourceIndex,
+    artist: item.ar?.map?.((entry) => entry.name).join(" / ") || artist.name,
+    cover: item.al?.picUrl || item.cover || "",
+    album: item.al?.name || item.album || ""
+  }, "netease")).filter((item) => item.id);
+}
+
+async function searchGlobalArtistSongs({ keyword, platform, count }) {
+  const expandedCount = Math.min(80, Math.max(count * 3, 48));
+  if (platform === "netease") {
+    const catalog = await searchNeteaseArtistCatalog(keyword, expandedCount);
+    if (catalog.length) return catalog;
+  }
+  const direct = await searchMusicsquareThirdParty({ keyword, platform, count: expandedCount }).catch((error) => {
+    console.warn(`artist direct third-party search failed on ${platform}:`, error.message);
+    return [];
+  });
+  const fallback = direct.length
+    ? []
+    : await searchMusic({ keyword, platform, count: expandedCount, page: 1 }).catch((error) => {
+        console.warn(`artist direct fallback search failed on ${platform}:`, error.message);
+        return [];
+      });
+  const directItems = (direct.length ? direct : fallback).filter((item) => artistMatchesKeyword(item, keyword));
+  const seedTitles = directItems.slice(0, 8).map((item) => item.title).filter(Boolean);
+  const relatedGroups = await Promise.all(
+    seedTitles.map((title) => searchMusicsquareThirdParty({ keyword: `${keyword} ${title}`, platform, count: 12 }).catch(() => []))
+  );
+  return [...directItems, ...relatedGroups.flat().filter((item) => artistMatchesKeyword(item, keyword))].slice(0, expandedCount);
+}
+
 async function searchWpMusic({ keyword, platform, count = 10, page = 1 }) {
   if (!wpMusicApiBaseUrl) return null;
   const wpPlatform = wpPlatformPath(platform);
@@ -3877,6 +4002,66 @@ app.get("/api/music/search", async (req, res, next) => {
       page: Number(req.query.page || 1)
     });
     res.json({ items });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/music/search-all", async (req, res, next) => {
+  try {
+    const keyword = String(req.query.keyword || "").trim();
+    if (!keyword) {
+      res.json({ items: [] });
+      return;
+    }
+    const count = clampInt(req.query.count, 4, 80, 24);
+    const mode = String(req.query.mode || "song").trim().toLowerCase();
+    const allowedPlatforms = new Set(["qq", "netease", "kuwo", "kugou"]);
+    const platforms = String(req.query.platforms || "qq,netease,kuwo,kugou")
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => allowedPlatforms.has(item));
+    const groups = await Promise.all(
+      platforms.map(async (platform) => {
+        const artistMode = mode === "artist" || mode === "singer";
+        const thirdPartyItems = artistMode
+          ? await searchGlobalArtistSongs({ keyword, platform, count }).catch((error) => {
+              console.warn(`artist global search failed on ${platform}:`, error.message);
+              return [];
+            })
+          : await searchMusicsquareThirdParty({ keyword, platform, count }).catch((error) => {
+              console.warn(`third-party global search failed on ${platform}:`, error.message);
+              return [];
+            });
+        const items = thirdPartyItems.length
+          ? thirdPartyItems
+          : await searchMusic({ keyword, platform, count: artistMode ? Math.min(80, count * 3) : count, page: 1 }).catch((error) => {
+              console.warn(`global search fallback failed on ${platform}:`, error.message);
+              return [];
+            });
+        return items.map((item) => ({
+          ...item,
+          globalSearch: true,
+          globalArtistName: artistMode ? keyword : "",
+          sourcePlatform: platform,
+          globalSearchMode: mode,
+          globalSearchProvider: thirdPartyItems.length ? "musicsquare-third-party" : "fallback"
+        }));
+      })
+    );
+    const seen = new Set();
+    const items = groups.flat().filter((item) => {
+      const key = `${item.platform || item.sourcePlatform}:${item.id || item.url}:${item.title}:${item.artist}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return item.id || item.url;
+    });
+    const stats = platforms.map((platform, index) => ({
+      platform,
+      count: groups[index]?.length || 0,
+      provider: groups[index]?.some((item) => item.globalSearchProvider === "musicsquare-third-party") ? "musicsquare-third-party" : "fallback"
+    }));
+    res.json({ items, stats, mode, keyword, platforms });
   } catch (error) {
     next(error);
   }

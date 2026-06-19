@@ -155,6 +155,12 @@ canvas {
   border-color: rgba(255, 210, 122, 0.5);
 }
 
+.filter.danger {
+  color: #baf7d2;
+  background: rgba(35, 211, 137, 0.12);
+  border-color: rgba(35, 211, 137, 0.48);
+}
+
 .login-actions {
   display: flex;
   gap: 8px;
@@ -276,6 +282,23 @@ canvas {
   border-color: rgba(255, 210, 122, 0.5);
 }
 
+.global-warning {
+  color: #ffe7a1;
+  background: rgba(255, 210, 122, 0.08);
+  border: 1px solid rgba(255, 210, 122, 0.2);
+  border-radius: 8px;
+  margin-top: 6px;
+  padding: 7px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.global-warning span {
+  color: #baf7d2;
+  margin-top: 3px;
+  display: block;
+}
+
 .search-results {
   backdrop-filter: blur(12px);
   background: rgba(8, 10, 18, 0.92);
@@ -322,7 +345,11 @@ canvas {
 
 .sr-meta {
   color: var(--muted);
+  text-align: right;
   white-space: nowrap;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: 11px;
 }
 
@@ -765,6 +792,49 @@ canvas {
   gap: 10px;
 }
 
+.artist-song-list {
+  display: grid;
+  gap: 6px;
+  max-height: 32vh;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.artist-song-list button {
+  width: 100%;
+  text-align: left;
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  padding: 8px 9px;
+}
+
+.artist-song-list button:hover {
+  color: var(--gold);
+  border-color: rgba(255, 210, 122, 0.32);
+  background: rgba(255, 210, 122, 0.09);
+}
+
+.artist-song-list span,
+.artist-song-list small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artist-song-list span {
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.artist-song-list small {
+  color: var(--muted);
+  margin-top: 2px;
+  font-size: 10px;
+}
+
 .copy-btn {
   color: var(--gold);
   cursor: pointer;
@@ -976,7 +1046,13 @@ button.copy-btn {
 
   .seg-btn,
   .filter {
-    padding: 7px 11px;
+    padding: 7px 9px;
+    font-size: 12px;
+  }
+
+  .seg {
+    max-width: 100%;
+    overflow-x: auto;
   }
 
   .login-actions {
