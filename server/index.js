@@ -4,6 +4,7 @@ import express from "express";
 import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { nanoid } from "nanoid";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -15,6 +16,9 @@ import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import ffprobeInstaller from "@ffprobe-installer/ffprobe";
 import { put } from "@vercel/blob";
 
+const require = createRequire(import.meta.url);
+const qqMusicApi = require("qq-music-api");
+const qqLoginQr = require("qq-login-qr");
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -27,6 +31,8 @@ const memoryFile = path.join(dataDir, "memory.json");
 const ffmpegBin = process.env.FFMPEG_PATH || ffmpegInstaller.path || "ffmpeg";
 const ffprobeBin = process.env.FFPROBE_PATH || ffprobeInstaller.path || "ffprobe";
 const musicApiBaseUrl = process.env.MUSIC_API_BASE_URL?.replace(/\/$/, "") || "";
+const wpMusicApiBaseUrl = process.env.WP_MUSIC_API_BASE_URL?.replace(/\/$/, "") || "";
+const qqMusicApi1BaseUrl = process.env.QQMUSIC_API1_BASE_URL?.replace(/\/$/, "") || "";
 const localMusicApiDir = process.env.LOCAL_MUSIC_API_DIR || "/Users/zhangzihang/music-api";
 const defaultMusicPlatform = process.env.MUSIC_API_DEFAULT_PLATFORM || "netease";
 const musicPlatforms = (process.env.MUSIC_API_PLATFORMS || "kugou,qq,netease,kuwo")
@@ -35,9 +41,17 @@ const musicPlatforms = (process.env.MUSIC_API_PLATFORMS || "kugou,qq,netease,kuw
   .filter(Boolean);
 const neteaseApiBaseUrl = process.env.NETEASE_API_BASE_URL?.replace(/\/$/, "") || "";
 const neteaseStateFile = path.join(dataDir, "netease.json");
+const qqMusicStateFile = path.join(dataDir, "qqmusic.json");
+const qqMusicQrAppId = process.env.QQMUSIC_QR_APPID || "716027609";
+const qqMusicQrCallback = process.env.QQMUSIC_QR_CALLBACK || "https://y.qq.com/portal/profile.html";
+const qqMusicQrConfigs = [
+  { appid: qqMusicQrAppId, callback: qqMusicQrCallback, label: "QQ 音乐网页登录" },
+  { appid: "549000912", callback: "https://qzs.qq.com/qzone/v5/loginsucc.html?para=izone", label: "通用 QQ 扫码" }
+].filter((item, index, list) => item.appid && item.callback && list.findIndex((entry) => entry.appid === item.appid && entry.callback === item.callback) === index);
 const narrationLeadInSeconds = 0.18;
 const requestWindows = new Map();
 const browserCookieName = "agentio_netease_cookie";
+const qqBrowserCookieName = "caelumshao_qqmusic_cookie";
 
 function clampInt(value, min, max, fallback = min) {
   const num = Number.parseInt(value, 10);
@@ -134,6 +148,10 @@ function cookieListFromRequest(req) {
   return cookieListFromEnv(parseRequestCookies(req)[browserCookieName]);
 }
 
+function qqCookieListFromRequest(req) {
+  return cookieListFromEnv(parseRequestCookies(req)[qqBrowserCookieName]);
+}
+
 function setBrowserNeteaseCookie(res, cookies = []) {
   const value = normalizeCookieList(cookies).join("; ");
   if (!value) return;
@@ -144,9 +162,33 @@ function setBrowserNeteaseCookie(res, cookies = []) {
   );
 }
 
+function setBrowserQQMusicCookie(res, cookies = []) {
+  const value = normalizeCookieList(cookies).join("; ");
+  if (!value) return;
+  const secure = process.env.NODE_ENV === "production" || process.env.VERCEL ? "; Secure" : "";
+  res.append?.(
+    "Set-Cookie",
+    `${qqBrowserCookieName}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000${secure}`
+  );
+  if (!res.append) {
+    res.setHeader(
+      "Set-Cookie",
+      `${qqBrowserCookieName}=${encodeURIComponent(value)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000${secure}`
+    );
+  }
+}
+
 function clearBrowserNeteaseCookie(res) {
   const secure = process.env.NODE_ENV === "production" || process.env.VERCEL ? "; Secure" : "";
   res.setHeader("Set-Cookie", `${browserCookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`);
+}
+
+function clearBrowserQQMusicCookie(res) {
+  const secure = process.env.NODE_ENV === "production" || process.env.VERCEL ? "; Secure" : "";
+  res.append?.("Set-Cookie", `${qqBrowserCookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`);
+  if (!res.append) {
+    res.setHeader("Set-Cookie", `${qqBrowserCookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`);
+  }
 }
 
 async function readMemory() {
@@ -194,8 +236,86 @@ async function saveNeteaseState(state) {
   await writeFile(neteaseStateFile, JSON.stringify(state, null, 2), "utf8");
 }
 
+async function readQQMusicState(req) {
+  const envCookies = cookieListFromEnv(process.env.QQMUSIC_COOKIE);
+  const requestCookies = qqCookieListFromRequest(req);
+  const initialCookies = requestCookies.length ? requestCookies : envCookies;
+  const envState = {
+    cookies: initialCookies,
+    uin: cookieObjectFromList(initialCookies).uin || "",
+    profile: null,
+    loggedIn: Boolean(initialCookies.length),
+    updatedAt: ""
+  };
+  if (!existsSync(qqMusicStateFile)) {
+    return envState;
+  }
+  const raw = await readFile(qqMusicStateFile, "utf8");
+  const state = JSON.parse(raw);
+  if (requestCookies.length) {
+    return {
+      ...state,
+      cookies: requestCookies,
+      uin: cookieObjectFromList(requestCookies).uin || state.uin || "",
+      loggedIn: true
+    };
+  }
+  if (!state.cookies?.length && envCookies.length) {
+    return {
+      ...state,
+      cookies: envCookies,
+      uin: cookieObjectFromList(envCookies).uin || state.uin || "",
+      loggedIn: true
+    };
+  }
+  return state;
+}
+
+async function saveQQMusicState(state) {
+  await writeFile(qqMusicStateFile, JSON.stringify(state, null, 2), "utf8");
+}
+
 function cookieHeaderFromState(state) {
   return (state?.cookies || []).join("; ");
+}
+
+function cookieObjectFromList(cookies = []) {
+  return Object.fromEntries(
+    normalizeCookieList(cookies).map((entry) => {
+      const index = entry.indexOf("=");
+      if (index === -1) return [entry, ""];
+      return [entry.slice(0, index), entry.slice(index + 1)];
+    })
+  );
+}
+
+function serializeQQMusicState(state) {
+  return {
+    loggedIn: Boolean(state?.loggedIn),
+    uin: state?.uin || "",
+    profile: state?.profile || null,
+    qrSig: state?.qrSig || "",
+    qrImg: state?.qrImg || "",
+    qrStatus: state?.qrStatus || "",
+    qrLoginType: state?.qrLoginType || "qq",
+    qrConfigIndex: state?.qrConfigIndex || 0,
+    qrConfigLabel: state?.qrConfigLabel || "",
+    qrNeedsRefresh: Boolean(state?.qrNeedsRefresh),
+    provider: state?.api1Credential?.musickey ? "QQMusicApi1" : "qq-music-api",
+    updatedAt: state?.updatedAt || ""
+  };
+}
+
+function setQQMusicApiCookie(cookies = []) {
+  const normalized = normalizeCookieList(cookies);
+  qqMusicApi.setCookie(normalized.join("; "));
+  return normalized;
+}
+
+async function qqMusicApiCall(pathname, query = {}, stateOrReq) {
+  const state = Array.isArray(stateOrReq?.cookies) ? stateOrReq : await readQQMusicState(stateOrReq);
+  setQQMusicApiCookie(state.cookies || []);
+  return qqMusicApi.api(pathname, query);
 }
 
 function parseSetCookies(headers) {
@@ -555,6 +675,252 @@ async function fetchNeteasePlaylistTracks(playlistId, req) {
   });
   const tracks = response?.body?.songs || response?.body?.data?.songs || response?.body?.playlist?.tracks || [];
   return tracks.map(normalizeTrackItem).filter((item) => item.id);
+}
+
+async function refreshQQMusicProfile(req) {
+  const state = await readQQMusicState(req);
+  if (!state.cookies?.length) return state;
+  setQQMusicApiCookie(state.cookies);
+  await qqMusicApi.api("user/refresh").catch(() => null);
+  const cookieObject = qqMusicApi.cookie || cookieObjectFromList(state.cookies);
+  const cookies = normalizeCookieList(Object.entries(cookieObject).map(([key, value]) => `${key}=${value}`));
+  const uin = String(cookieObject.uin || state.uin || "").replace(/\D/g, "");
+  const profile = uin ? await qqMusicApi.api("user/detail", { id: uin }).catch(() => null) : null;
+  const nextState = {
+    ...state,
+    cookies: cookies.length ? cookies : state.cookies,
+    uin,
+    profile: profile || state.profile || null,
+    loggedIn: Boolean(uin || cookies.length),
+    updatedAt: new Date().toISOString()
+  };
+  await saveQQMusicState(nextState);
+  return nextState;
+}
+
+async function loginQQMusicWithCookie(cookie) {
+  const raw = String(cookie || "").trim();
+  if (raw.startsWith("{")) {
+    const parsed = JSON.parse(raw);
+    const credential = normalizeQQMusicApi1Credential(parsed.credential || parsed);
+    if (!credential.musicid || !credential.musickey) throw new Error("QQMusicApi1 Credential 缺少 musicid 或 musickey");
+    const state = {
+      cookies: [],
+      api1Credential: credential,
+      uin: String(credential.musicid),
+      profile: { nick: String(credential.musicid) },
+      loggedIn: true,
+      updatedAt: new Date().toISOString()
+    };
+    await saveQQMusicState(state);
+    return state;
+  }
+
+  const cookies = normalizeCookieList(cookie);
+  if (!cookies.length) throw new Error("请粘贴 QQ 音乐网页 Cookie");
+  setQQMusicApiCookie(cookies);
+  await qqMusicApi.api("user/refresh").catch(() => null);
+  const cookieObject = qqMusicApi.cookie || cookieObjectFromList(cookies);
+  const nextCookies = normalizeCookieList(Object.entries(cookieObject).map(([key, value]) => `${key}=${value}`));
+  const state = {
+    cookies: nextCookies.length ? nextCookies : cookies,
+    uin: String(cookieObject.uin || cookieObject.wxuin || "").replace(/\D/g, ""),
+    profile: null,
+    loggedIn: Boolean(cookieObject.uin || cookieObject.wxuin || cookies.length),
+    updatedAt: new Date().toISOString()
+  };
+  await saveQQMusicState(state);
+  return refreshQQMusicProfile().catch(() => state);
+}
+
+function normalizeQQMusicQrLoginType(value) {
+  return String(value || "qq").toLowerCase() === "wx" ? "wx" : "qq";
+}
+
+function qqMusicQrLoginTypeLabel(type) {
+  return normalizeQQMusicQrLoginType(type) === "wx" ? "微信" : "手机 QQ";
+}
+
+function isQQMusicApi1QrStatusFailure(error) {
+  return error?.name === "AbortError" || /获取二维码状态失败|无法解析响应|invalid json|timed out|timeout|aborted|fetch failed|undici/i.test(error?.message || "");
+}
+
+async function startQQMusicQrLogin(preferIndex = 0, loginType = "qq") {
+  const safeLoginType = normalizeQQMusicQrLoginType(loginType);
+  if (qqMusicApi1BaseUrl) {
+    const payload = await fetchQQMusicApi1(`/login/qrcode/${safeLoginType}`);
+    const state = await readQQMusicState();
+    const nextState = {
+      ...state,
+      qrSig: payload.identifier || "",
+      qrImg: payload.img || "",
+      qrLoginType: safeLoginType,
+      qrStatus: `请使用${qqMusicQrLoginTypeLabel(safeLoginType)}扫码（QQMusicApi1）`,
+      qrProvider: "qqmusic-api1",
+      qrConfigLabel: "QQMusicApi1",
+      qrNeedsRefresh: false,
+      updatedAt: new Date().toISOString()
+    };
+    await saveQQMusicState(nextState);
+    return nextState;
+  }
+
+  if (safeLoginType === "wx") {
+    throw new Error("微信扫码需要配置 QQMUSIC_API1_BASE_URL，并确保 QQMusicApi1 服务已启动");
+  }
+
+  const config = qqMusicQrConfigs[clampInt(preferIndex, 0, qqMusicQrConfigs.length - 1, 0)] || qqMusicQrConfigs[0];
+  const qr = await qqLoginQr.getQrcode(config.appid, config.callback);
+  const state = await readQQMusicState();
+  const nextState = {
+    ...state,
+    qrSig: qr.qrsig || "",
+    qrImg: qr.image || "",
+    qrConfigIndex: qqMusicQrConfigs.indexOf(config),
+    qrConfigLabel: config.label,
+    qrStatus: `请使用手机 QQ 扫码（${config.label}）`,
+    qrLoginType: "qq",
+    qrProvider: "qq-login-qr",
+    qrNeedsRefresh: false,
+    updatedAt: new Date().toISOString()
+  };
+  await saveQQMusicState(nextState);
+  return nextState;
+}
+
+async function checkQQMusicQrLogin(qrSig) {
+  const state = await readQQMusicState();
+  const currentQrSig = qrSig || state.qrSig;
+  if (!currentQrSig) throw new Error("没有可用的 QQ 音乐二维码");
+  if (state.qrProvider === "qqmusic-api1" || qqMusicApi1BaseUrl) {
+    const loginType = normalizeQQMusicQrLoginType(state.qrLoginType);
+    let payload = null;
+    try {
+      payload = await fetchQQMusicApi1(`/login/qrcode/${loginType}/status`, {
+        params: { identifier: currentQrSig }
+      });
+    } catch (error) {
+      if (!isQQMusicApi1QrStatusFailure(error)) throw error;
+      const fallbackToWx = loginType === "qq";
+      const nextState = {
+        ...state,
+        qrStatus: fallbackToWx
+          ? "QQ 扫码已被腾讯状态接口拦截，无法确认登录结果。请切换微信扫码，或使用网页导入。"
+          : "微信扫码状态暂时无法读取。请刷新二维码重试，或使用网页导入。",
+        qrNeedsRefresh: true,
+        updatedAt: new Date().toISOString()
+      };
+      await saveQQMusicState(nextState);
+      return {
+        ...serializeQQMusicState(nextState),
+        code: -1,
+        qrStatus: nextState.qrStatus,
+        qrNeedsRefresh: true,
+        qrAlternative: fallbackToWx ? "wx" : "cookie",
+        needCookieImport: !fallbackToWx
+      };
+    }
+    const done = Boolean(payload.done || payload.event === 0);
+    if (!done) {
+      const statusText = payload.event === 1 ? "等待扫码" : payload.event === 2 ? "已扫码，等待确认" : payload.event === 3 ? "二维码已过期" : payload.event === 4 ? "已拒绝登录" : "等待扫码确认";
+      const nextState = {
+        ...state,
+        qrStatus: statusText,
+        qrNeedsRefresh: payload.event === 3,
+        updatedAt: new Date().toISOString()
+      };
+      await saveQQMusicState(nextState);
+      return { ...serializeQQMusicState(nextState), code: payload.event, qrStatus: statusText };
+    }
+
+    const credential = normalizeQQMusicApi1Credential(payload.credential || {});
+    const nextState = {
+      ...state,
+      api1Credential: credential,
+      uin: String(credential.musicid || ""),
+      profile: { nick: String(credential.musicid || "QQ 音乐已登录") },
+      loggedIn: Boolean(credential.musicid && credential.musickey),
+      qrStatus: "QQ 音乐登录成功",
+      updatedAt: new Date().toISOString()
+    };
+    await saveQQMusicState(nextState);
+    return {
+      ...serializeQQMusicState(nextState),
+      code: 0,
+      qrStatus: nextState.qrStatus,
+      api1Credential: credential
+    };
+  }
+
+  const config = qqMusicQrConfigs[clampInt(state.qrConfigIndex, 0, qqMusicQrConfigs.length - 1, 0)] || qqMusicQrConfigs[0];
+  const result = await qqLoginQr.getResult(currentQrSig, config.appid, config.callback);
+  if (result.code !== 0) {
+    const unknown = /未知状态|appid|回调|callback/i.test(result.msg || "");
+    const nextState = {
+      ...state,
+      qrStatus: unknown ? `${config.label}不可用，请刷新二维码或切换网页导入` : result.msg || "等待扫码确认",
+      qrNeedsRefresh: unknown,
+      updatedAt: new Date().toISOString()
+    };
+    await saveQQMusicState(nextState);
+    return {
+      ...serializeQQMusicState(nextState),
+      code: result.code,
+      qrStatus: nextState.qrStatus,
+      qrNeedsRefresh: unknown,
+      nextQrConfigIndex: unknown ? Math.min((state.qrConfigIndex || 0) + 1, qqMusicQrConfigs.length - 1) : state.qrConfigIndex || 0
+    };
+  }
+
+  const cookies = normalizeCookieList(
+    Object.entries(result.cookies || {}).map(([key, value]) => `${key}=${value}`)
+  );
+  const candidateState = {
+    ...state,
+    cookies,
+    uin: String(result.cookies?.uin || state.uin || "").replace(/\D/g, ""),
+    profile: result.nick ? { nick: result.nick } : state.profile,
+    loggedIn: Boolean(cookies.length),
+    qrStatus: "QQ 已扫码，正在换取 QQ 音乐登录态",
+    updatedAt: new Date().toISOString()
+  };
+  await saveQQMusicState(candidateState);
+
+  const refreshed = await refreshQQMusicProfile().catch(() => candidateState);
+  const cookieObject = cookieObjectFromList(refreshed.cookies || []);
+  const hasMusicKey = Boolean(cookieObject.qm_keyst || cookieObject.qqmusic_key);
+  return {
+    ...serializeQQMusicState(refreshed),
+    code: result.code,
+    qrStatus: hasMusicKey ? "QQ 音乐登录成功" : "扫码成功，但没有拿到 QQ 音乐 Cookie",
+    cookies: refreshed.cookies || [],
+    needCookieImport: !hasMusicKey
+  };
+}
+
+async function fetchQQMusicPlaylists(req) {
+  const state = await refreshQQMusicProfile(req).catch(() => readQQMusicState(req));
+  const uin = state?.uin || "";
+  if (!uin) throw new Error("尚未登录 QQ 音乐，无法获取歌单");
+  const created = await qqMusicApiCall("user/songlist", { id: uin }, state).catch(() => ({ list: [] }));
+  const collected = await qqMusicApiCall("user/collect/songlist", { id: uin, pageNo: 1, pageSize: 80 }, state).catch(() => ({ list: [] }));
+  const merged = [...(created?.list || []), ...(collected?.list || [])];
+  const seen = new Set();
+  return merged
+    .map(normalizeQQMusicPlaylistItem)
+    .filter((playlist) => {
+      if (!playlist.id || seen.has(String(playlist.id))) return false;
+      seen.add(String(playlist.id));
+      return true;
+    });
+}
+
+async function fetchQQMusicPlaylistTracks(playlistId, req) {
+  if (!playlistId) throw new Error("缺少 QQ 音乐歌单 ID");
+  const state = await readQQMusicState(req);
+  const detail = await qqMusicApiCall("songlist", { id: playlistId }, state);
+  const tracks = detail?.songlist || detail?.songList || detail?.songs || detail?.list || [];
+  return (Array.isArray(tracks) ? tracks : []).map(normalizeQQMusicTrackItem).filter((item) => item.id);
 }
 
 async function buildPlaylistPodcastBrief({ prompt, playlist, tracks, memory }) {
@@ -1026,6 +1392,21 @@ function normalizePlaylistItem(item) {
   };
 }
 
+function normalizeQQMusicPlaylistItem(item) {
+  const id = item.dissid || item.tid || item.id || item.dirid || item.encrypt_uin || "";
+  return {
+    id,
+    name: item.diss_name || item.title || item.name || item.dirname || "未命名 QQ 歌单",
+    cover: item.diss_cover || item.logo || item.picurl || item.cover || "",
+    description: item.desc || item.intro || item.description || "",
+    trackCount: item.song_cnt || item.songnum || item.song_count || item.total_song_num || 0,
+    playCount: item.listen_num || item.visitnum || item.playCount || 0,
+    creator: item.creator?.nick || item.creator?.name || item.nickname || item.hostname || "",
+    platform: "qq",
+    raw: item
+  };
+}
+
 function normalizeTrackItem(item) {
   const artist =
     item.ar?.map?.((entry) => entry.name).join(" / ") ||
@@ -1044,6 +1425,31 @@ function normalizeTrackItem(item) {
     publishTime: item.publishTime || item.publishTimeStr || item.publish_time || item.raw?.publishTime || "",
     year: item.publishTime ? new Date(Number(item.publishTime)).getFullYear() : "",
     platform: "netease",
+    raw: item
+  };
+}
+
+function normalizeQQMusicTrackItem(item) {
+  const singerList = item.singer || item.singers || item.singerlist || item.action?.singer || [];
+  const artist = Array.isArray(singerList)
+    ? singerList.map((entry) => entry.name || entry.title || entry.mid || "").filter(Boolean).join(" / ")
+    : item.singername || item.artist || item.subtitle || "";
+  const album = item.albumname || item.album?.name || item.album || "";
+  const mid = item.songmid || item.mid || item.strMediaMid || item.strMediaMid || item.media_mid || item.id || item.songid || "";
+  const coverMid = item.albummid || item.album?.mid || item.album_mid || "";
+  const cover = item.cover || item.pic || item.image || (coverMid ? `https://y.qq.com/music/photo_new/T002R300x300M000${coverMid}.jpg` : "");
+  return {
+    id: mid,
+    songId: item.songid || item.id || "",
+    title: item.songname || item.name || item.title || "未命名歌曲",
+    artist: String(artist || "未知艺人"),
+    album,
+    cover,
+    duration: Number(item.interval || item.duration || 0) || 0,
+    publishTime: item.time_public || item.public_time || "",
+    year: String(item.time_public || item.public_time || "").slice(0, 4),
+    mediaId: item.strMediaMid || item.media_mid || mid,
+    platform: "qq",
     raw: item
   };
 }
@@ -1343,6 +1749,229 @@ function getLocalMusicScript(platform = defaultMusicPlatform) {
   return existsSync(scriptPath) ? scriptPath : "";
 }
 
+function wpPlatformPath(platform = defaultMusicPlatform) {
+  const map = {
+    qq: "qq",
+    netease: "wy",
+    wy: "wy",
+    kuwo: "kuwo",
+    kugou: "kugou",
+    migu: "migu"
+  };
+  return map[String(platform || "").toLowerCase()] || String(platform || defaultMusicPlatform).replace(/[^a-z0-9_-]/gi, "");
+}
+
+async function fetchWpMusicApi(pathname, params = {}) {
+  if (!wpMusicApiBaseUrl) return null;
+  const url = new URL(pathname.replace(/^\//, ""), `${wpMusicApiBaseUrl}/`);
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
+  });
+  const response = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!response.ok) throw new Error(`wp_MusicApi failed: ${response.status}`);
+  const text = await response.text();
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch (_error) {
+    throw new Error("wp_MusicApi returned invalid JSON");
+  }
+}
+
+async function fetchQQMusicApi1(pathname, { method = "GET", params = {}, body, credential } = {}) {
+  if (!qqMusicApi1BaseUrl) return null;
+  const url = new URL(pathname.replace(/^\//, ""), `${qqMusicApi1BaseUrl}/`);
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
+  });
+  const headers = { Accept: "application/json" };
+  const cookie = credentialCookieFromQQMusicApi1Credential(credential);
+  if (cookie) headers.Cookie = cookie;
+  if (body) headers["Content-Type"] = "application/json";
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  let response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+  const text = await response.text();
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch (_error) {
+    throw new Error("QQMusicApi1 returned invalid JSON");
+  }
+  if (!response.ok || payload?.code === -1) {
+    throw new Error(payload?.msg || `QQMusicApi1 failed: ${response.status}`);
+  }
+  return payload?.data ?? payload;
+}
+
+function credentialCookieFromQQMusicApi1Credential(credential = null) {
+  const item = credential || {};
+  const pairs = [
+    ["musicid", item.musicid],
+    ["musickey", item.musickey],
+    ["openid", item.openid],
+    ["refresh_token", item.refresh_token],
+    ["access_token", item.access_token],
+    ["expired_at", item.expired_at],
+    ["unionid", item.unionid],
+    ["str_musicid", item.str_musicid],
+    ["refresh_key", item.refresh_key]
+  ].filter(([, value]) => value !== undefined && value !== null && value !== "");
+  return pairs.map(([key, value]) => `${key}=${encodeURIComponent(String(value))}`).join("; ");
+}
+
+function normalizeQQMusicApi1Credential(credential = {}) {
+  return {
+    musicid: Number(credential.musicid || credential.musicID || 0) || 0,
+    musickey: credential.musickey || credential.music_key || "",
+    openid: credential.openid || "",
+    refresh_token: credential.refresh_token || credential.refreshToken || "",
+    access_token: credential.access_token || credential.accessToken || "",
+    expired_at: Number(credential.expired_at || credential.expiredAt || 0) || 0,
+    unionid: credential.unionid || "",
+    str_musicid: credential.str_musicid || credential.strMusicid || String(credential.musicid || ""),
+    refresh_key: credential.refresh_key || credential.refreshKey || "",
+    raw: credential
+  };
+}
+
+function normalizeWpSearchResponse(payload, platform) {
+  const candidates =
+    payload?.req?.data?.body?.song?.list ||
+    payload?.req?.data?.body?.list ||
+    payload?.data?.song?.list ||
+    payload?.data?.list ||
+    payload?.song?.list ||
+    payload?.list ||
+    [];
+  const list = Array.isArray(candidates) ? candidates : [candidates].filter(Boolean);
+  return list.map((item, sourceIndex) => normalizeSearchItem({
+    ...item,
+    id: item.mid || item.songmid || item.id || item.songid,
+    title: item.name || item.songname || item.title,
+    artist: item.singer?.map?.((entry) => entry.name).join(" / ") || item.singername || item.artist,
+    album: item.album?.name || item.albumname || item.album,
+    cover: item.album?.mid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${item.album.mid}.jpg` : item.cover,
+    duration: item.interval || item.duration,
+    sourceIndex
+  }, platform)).filter((item) => item.id || item.url);
+}
+
+function unwrapQQMusicApi1Items(payload) {
+  return (
+    payload?.items ||
+    payload?.list ||
+    payload?.songs ||
+    payload?.song?.list ||
+    payload?.body?.song?.list ||
+    payload?.data?.items ||
+    payload?.data?.list ||
+    payload?.data?.song?.list ||
+    []
+  );
+}
+
+function normalizeQQMusicApi1SearchResponse(payload) {
+  const candidates = unwrapQQMusicApi1Items(payload);
+  const list = Array.isArray(candidates) ? candidates : [candidates].filter(Boolean);
+  return list.map((item, sourceIndex) => {
+    const albumMid = item.album?.mid || item.albummid || item.album_mid || "";
+    const artist = item.singer?.map?.((entry) => entry.name).filter(Boolean).join(" / ") || item.singername || item.artist || "";
+    return normalizeSearchItem({
+      ...item,
+      id: item.mid || item.songmid || item.id || item.songid,
+      title: item.name || item.title || item.songname,
+      artist,
+      album: item.album?.name || item.albumname || item.album,
+      cover: item.cover || item.pic || (albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : ""),
+      duration: item.interval || item.duration,
+      sourceIndex
+    }, "qq");
+  }).filter((item) => item.id || item.url);
+}
+
+async function searchQQMusicApi1({ keyword, count = 10, page = 1 }) {
+  if (!qqMusicApi1BaseUrl) return null;
+  const payload = await fetchQQMusicApi1("/search/search_by_type", {
+    params: {
+      keyword,
+      search_type: 0,
+      num: count,
+      page
+    }
+  });
+  return normalizeQQMusicApi1SearchResponse(payload);
+}
+
+async function searchWpMusic({ keyword, platform, count = 10, page = 1 }) {
+  if (!wpMusicApiBaseUrl) return null;
+  const wpPlatform = wpPlatformPath(platform);
+  if (wpPlatform === "qq") {
+    const payload = await fetchWpMusicApi("/v1/qq/search", {
+      key: keyword,
+      limit: count,
+      offset: page,
+      type: 0
+    });
+    return normalizeWpSearchResponse(payload, "qq");
+  }
+  const payload = await fetchWpMusicApi(`/v1/${wpPlatform}/search`, {
+    key: keyword,
+    limit: count,
+    offset: page
+  }).catch(() => null);
+  return payload ? normalizeSearchResponse(payload, platform) : null;
+}
+
+async function resolveWpMusicUrl({ id, platform, br = "m4a" }) {
+  if (!wpMusicApiBaseUrl || !id) return "";
+  const wpPlatform = wpPlatformPath(platform);
+  if (wpPlatform === "qq") {
+    for (const currentBr of [br, "320", "128"].filter(Boolean)) {
+      const payload = await fetchWpMusicApi("/v1/qq/song", { mid: id, br: currentBr }).catch(() => null);
+      const candidate = Array.isArray(payload?.data?.url) ? payload.data.url.find(Boolean) : payload?.data?.url || payload?.url || "";
+      if (isPlayableMusicUrl(candidate)) return candidate;
+    }
+    return "";
+  }
+  const payload = await fetchWpMusicApi(`/v1/${wpPlatform}/song`, { mid: id, id, br }).catch(() => null);
+  const candidate = payload?.data?.url || payload?.url || payload?.data?.song_url || "";
+  return isPlayableMusicUrl(candidate) ? candidate : "";
+}
+
+async function resolveQQMusicApi1Url({ id, mediaId = "", songType = null }) {
+  if (!qqMusicApi1BaseUrl || !id) return "";
+  const state = await readQQMusicState().catch(() => ({}));
+  const credential = state?.api1Credential || null;
+  for (const fileType of [5, 4, 3, 2, 1]) {
+    const payload = await fetchQQMusicApi1(`/song/${encodeURIComponent(id)}/url`, {
+      params: {
+        file_type: fileType,
+        song_type: songType || "",
+        media_mid: mediaId || ""
+      },
+      credential
+    }).catch(() => null);
+    const first = Array.isArray(payload?.data) ? payload.data[0] : Array.isArray(payload?.midurlinfo) ? payload.midurlinfo[0] : null;
+    const candidate =
+      first?.url ||
+      first?.purl && `https://isure.stream.qqmusic.qq.com/${first.purl}` ||
+      payload?.url ||
+      "";
+    if (isPlayableMusicUrl(candidate)) return candidate;
+  }
+  return "";
+}
+
 async function runLocalMusicScript(platform, params) {
   const scriptPath = getLocalMusicScript(platform);
   if (!scriptPath) return null;
@@ -1411,6 +2040,20 @@ function isPlayableMusicUrl(url) {
 }
 
 async function searchMusic({ keyword, platform, count = 10, page = 1 }) {
+  if (platform === "qq") {
+    const api1Items = await searchQQMusicApi1({ keyword, count, page }).catch((error) => {
+      console.warn("QQMusicApi1 search failed:", error.message);
+      return null;
+    });
+    if (api1Items?.length) return api1Items;
+  }
+
+  const wpItems = await searchWpMusic({ keyword, platform, count, page }).catch((error) => {
+    console.warn(`wp_MusicApi search failed on ${platform}:`, error.message);
+    return null;
+  });
+  if (wpItems?.length) return wpItems;
+
   const localPayload = await runLocalMusicScript(platform, {
     msg: keyword,
     type: "song",
@@ -1450,6 +2093,20 @@ async function resolveMusicUrl({ id, url: directUrl, platform }) {
   if (isPlayableMusicUrl(directUrl)) return directUrl;
   if (!id || platform === "demo") return "";
 
+  if (platform === "qq") {
+    const api1Url = await resolveQQMusicApi1Url({ id }).catch((error) => {
+      console.warn("QQMusicApi1 resolve failed:", error.message);
+      return "";
+    });
+    if (isPlayableMusicUrl(api1Url)) return api1Url;
+  }
+
+  const wpUrl = await resolveWpMusicUrl({ id, platform }).catch((error) => {
+    console.warn(`wp_MusicApi resolve failed on ${platform}:`, error.message);
+    return "";
+  });
+  if (isPlayableMusicUrl(wpUrl)) return wpUrl;
+
   // 网易云优先使用登录态获取完整版，避免本地 PHP 外链接口返回 45s 试听
   if (platform === "netease") {
     try {
@@ -1472,6 +2129,17 @@ async function resolveMusicUrl({ id, url: directUrl, platform }) {
             if (!dur || dur >= 60) return candidate;
           }
         } catch (e) {}
+      }
+    } catch (e) {}
+  }
+
+  if (platform === "qq") {
+    try {
+      const state = await readQQMusicState();
+      if (state.cookies?.length) {
+        const payload = await qqMusicApiCall("song/url", { id, type: "m4a" }, state).catch(() => "");
+        const candidate = typeof payload === "string" ? payload : payload?.url || payload?.data || "";
+        if (isPlayableMusicUrl(candidate)) return candidate;
       }
     } catch (e) {}
   }
@@ -2089,7 +2757,9 @@ app.get("/api/config", (_req, res) => {
     openaiBaseUrl: process.env.OPENAI_BASE_URL || "",
     ttsBaseUrl: process.env.OPENAI_TTS_BASE_URL || process.env.OPENAI_BASE_URL || "",
     homepodShortcutConfigured: Boolean(process.env.HOMEPOD_SHORTCUT_NAME),
-    musicApiConfigured: Boolean(musicApiBaseUrl || existsSync(localMusicApiDir)),
+    musicApiConfigured: Boolean(wpMusicApiBaseUrl || musicApiBaseUrl || existsSync(localMusicApiDir)),
+    qqMusicApi1Configured: Boolean(qqMusicApi1BaseUrl),
+    wpMusicApiConfigured: Boolean(wpMusicApiBaseUrl),
     localMusicApiConfigured: Boolean(existsSync(localMusicApiDir)),
     musicPlatform: defaultMusicPlatform
   });
@@ -2231,6 +2901,105 @@ app.get("/api/netease/library/tracks", async (req, res, next) => {
       playlists: [],
       items: [],
       warning: error.message || "网易云曲库暂时没有载入"
+    });
+  }
+});
+
+app.get("/api/qqmusic/state", async (req, res, next) => {
+  try {
+    const state = await refreshQQMusicProfile(req).catch(() => readQQMusicState(req));
+    res.json(serializeQQMusicState(await state));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/qqmusic/login/cookie", async (req, res, next) => {
+  try {
+    const result = await loginQQMusicWithCookie(String(req.body?.cookie || req.body?.data || "").trim());
+    if (result.cookies?.length) setBrowserQQMusicCookie(res, result.cookies);
+    res.json(serializeQQMusicState(result));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/qqmusic/login/qr/start", async (req, res, next) => {
+  try {
+    const state = await startQQMusicQrLogin(
+      req.body?.configIndex || req.query?.configIndex || 0,
+      req.body?.loginType || req.query?.loginType || "qq"
+    );
+    res.json(serializeQQMusicState(state));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/qqmusic/login/qr/check", async (req, res, next) => {
+  try {
+    const result = await checkQQMusicQrLogin(String(req.body?.qrSig || req.body?.qrsig || "").trim());
+    if (result.cookies?.length) setBrowserQQMusicCookie(res, result.cookies);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/qqmusic/logout", async (_req, res, next) => {
+  try {
+    const nextState = { cookies: [], uin: "", profile: null, loggedIn: false, updatedAt: new Date().toISOString() };
+    await saveQQMusicState(nextState);
+    clearBrowserQQMusicCookie(res);
+    res.json(serializeQQMusicState(nextState));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/qqmusic/playlists", async (req, res, next) => {
+  try {
+    const items = await fetchQQMusicPlaylists(req);
+    res.json({ items });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/qqmusic/playlist/:id/tracks", async (req, res, next) => {
+  try {
+    const items = await fetchQQMusicPlaylistTracks(req.params.id, req);
+    res.json({ items });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/qqmusic/library/tracks", async (req, res, next) => {
+  try {
+    const playlists = await fetchQQMusicPlaylists(req);
+    const groups = await Promise.all(
+      playlists.map(async (playlist) => {
+        const tracks = await fetchQQMusicPlaylistTracks(playlist.id, req).catch(() => []);
+        return tracks.map((track, index) => ({
+          ...track,
+          cover: track.cover || playlist.cover || "",
+          libraryKey: `qq:${playlist.id}:${track.id || track.songId || index}:${index}`,
+          playlistId: playlist.id,
+          playlistName: playlist.name,
+          playlistDescription: playlist.description || ""
+        }));
+      })
+    );
+    res.json({
+      playlists,
+      items: groups.flat()
+    });
+  } catch (error) {
+    res.status(200).json({
+      playlists: [],
+      items: [],
+      warning: error.message || "QQ 音乐曲库暂时没有载入"
     });
   }
 });

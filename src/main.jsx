@@ -27,6 +27,28 @@ function normalizeText(value) {
   return String(value || "").toLowerCase().trim();
 }
 
+function isQqQrLoginMode(mode) {
+  return mode === "qq-qr" || mode === "qq-wx-qr";
+}
+
+function qqQrLoginTypeFromMode(mode) {
+  return mode === "qq-wx-qr" ? "wx" : "qq";
+}
+
+async function readJsonResponse(response, fallbackMessage = "接口请求失败") {
+  const text = await response.text();
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    const looksLikeHtml = /^\s*</.test(text);
+    throw new Error(looksLikeHtml ? `${fallbackMessage}：服务端返回了 HTML，通常是 API 路由没有命中或后端未启动。` : text || fallbackMessage);
+  }
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch (_error) {
+    throw new Error(`${fallbackMessage}：服务端返回的 JSON 无法解析`);
+  }
+}
+
 function trackSearchText(track) {
   return normalizeText(
     [
@@ -556,6 +578,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
 
 function App() {
   const [neteaseState, setNeteaseState] = useState(null);
+  const [qqMusicState, setQqMusicState] = useState(null);
   const [libraryTracks, setLibraryTracks] = useState([]);
   const [selectedTrack, setSelectedTrack] = useState(null);
   const [hoveredTrack, setHoveredTrack] = useState(null);
@@ -587,11 +610,14 @@ function App() {
   const [jumping, setJumping] = useState(false);
   const [deepFocus, setDeepFocus] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
+  const [loginProvider, setLoginProvider] = useState("netease");
   const [loginMode, setLoginMode] = useState("qr");
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginMessage, setLoginMessage] = useState("");
   const [phone, setPhone] = useState("");
   const [captcha, setCaptcha] = useState("");
+  const [qqCookie, setQqCookie] = useState("");
+  const [qqQrConfigIndex, setQqQrConfigIndex] = useState(0);
 
   const audioRef = useRef(null);
   const analyserRef = useRef(null);
@@ -601,7 +627,9 @@ function App() {
   const queueIndexRef = useRef(-1);
   const playTokenRef = useRef(0);
 
-  const isLoggedIn = Boolean(neteaseState?.loggedIn);
+  const isNeteaseLoggedIn = Boolean(neteaseState?.loggedIn);
+  const isQqMusicLoggedIn = Boolean(qqMusicState?.loggedIn);
+  const isLoggedIn = isNeteaseLoggedIn || isQqMusicLoggedIn;
   const showPlayer = Boolean(playerSource || trackQueue.length);
   const filteredTracks = useMemo(() => {
     const base = libraryTracks.filter((track) => {
@@ -631,30 +659,69 @@ function App() {
 
   async function refreshNeteaseState() {
     const response = await fetch("/api/netease/state");
-    const data = await response.json();
+    const data = await readJsonResponse(response);
     if (!response.ok) throw new Error(data.error || "网易云状态读取失败");
     setNeteaseState(data);
     return data;
   }
 
+  async function refreshQqMusicState() {
+    const response = await fetch("/api/qqmusic/state");
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "QQ 音乐状态读取失败");
+    setQqMusicState(data);
+    return data;
+  }
+
   async function loadNeteaseLibrary() {
     const response = await fetch("/api/netease/library/tracks");
-    const data = await response.json();
+    const data = await readJsonResponse(response);
     if (!response.ok) throw new Error(data.error || "网易云曲库暂时没有载入");
-    setLibraryTracks(data.items || []);
     return data.items || [];
+  }
+
+  async function loadQqMusicLibrary() {
+    const response = await fetch("/api/qqmusic/library/tracks");
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "QQ 音乐曲库暂时没有载入");
+    return data.items || [];
+  }
+
+  async function loadAllLibraries() {
+    const [neteaseItems, qqItems] = await Promise.all([
+      loadNeteaseLibrary().catch(() => []),
+      loadQqMusicLibrary().catch(() => [])
+    ]);
+    const merged = [...neteaseItems, ...qqItems];
+    setLibraryTracks(merged);
+    if (!merged.length) setMessage("还没有载入曲库，请先登录网易云或 QQ 音乐");
+    return merged;
   }
 
   useEffect(() => {
     refreshNeteaseState().catch(() => setNeteaseState({ loggedIn: false }));
+    refreshQqMusicState().catch(() => setQqMusicState({ loggedIn: false }));
   }, []);
 
   useEffect(() => {
-    loadNeteaseLibrary().catch(() => {
+    const hash = window.location.hash || "";
+    const marker = "#qqmusic_cookie=";
+    if (!hash.startsWith(marker)) return;
+    const cookieValue = decodeURIComponent(hash.slice(marker.length));
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    setLoginOpen(true);
+    setLoginProvider("qq");
+    setLoginMode("qq-cookie");
+    setLoginMessage("已收到 QQ 音乐网页 Cookie，正在自动登录");
+    void loginWithQqCookieValue(cookieValue);
+  }, []);
+
+  useEffect(() => {
+    loadAllLibraries().catch(() => {
       setLibraryTracks([]);
-      setMessage("网易云曲库暂时没有载入");
+      setMessage("曲库暂时没有载入");
     });
-  }, [isLoggedIn]);
+  }, [isNeteaseLoggedIn, isQqMusicLoggedIn]);
 
   useEffect(() => {
     if (!loginOpen || loginMode !== "qr" || !neteaseState?.qrKey || isLoggedIn) return undefined;
@@ -665,13 +732,13 @@ function App() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ key: neteaseState.qrKey })
         });
-        const data = await response.json();
+        const data = await readJsonResponse(response);
         if (!response.ok) throw new Error(data.error || "二维码状态检查失败");
         if (data.loggedIn || data.code === 803 || data.code === 200) {
           setLoginMessage("登录成功，正在同步歌单");
           setLoginOpen(false);
           setNeteaseState(data);
-          await loadNeteaseLibrary().catch(() => null);
+          await loadAllLibraries().catch(() => null);
         } else if (data.qrStatus || data.payload?.message) {
           setLoginMessage(data.qrStatus || data.payload?.message);
         }
@@ -681,6 +748,47 @@ function App() {
     }, 1800);
     return () => window.clearInterval(timer);
   }, [isLoggedIn, loginMode, loginOpen, neteaseState?.qrKey]);
+
+  useEffect(() => {
+    if (!loginOpen || loginProvider !== "qq" || !isQqQrLoginMode(loginMode) || !qqMusicState?.qrSig || isQqMusicLoggedIn) return undefined;
+    const expectedLoginType = qqQrLoginTypeFromMode(loginMode);
+    if (qqMusicState?.qrLoginType && qqMusicState.qrLoginType !== expectedLoginType) return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        const response = await fetch("/api/qqmusic/login/qr/check", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ qrSig: qqMusicState.qrSig })
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok) throw new Error(data.error || "QQ 音乐二维码状态检查失败");
+        setQqMusicState(data);
+        if (data.loggedIn && !data.needCookieImport) {
+          setLoginMessage("QQ 音乐登录成功，正在同步歌单");
+          setLoginOpen(false);
+          await loadAllLibraries().catch(() => null);
+        } else if (data.qrAlternative === "wx") {
+          setLoginMode("qq-wx-qr");
+          setQqMusicState((state) => (state ? { ...state, qrSig: "", qrImg: "", qrStatus: data.qrStatus || "", qrLoginType: "wx" } : data));
+          setLoginMessage("QQ 扫码状态无法确认，请切换到微信扫码后重新生成二维码。");
+        } else if (data.qrAlternative === "cookie") {
+          setLoginMode("qq-cookie");
+          setLoginMessage(data.qrStatus || "扫码状态暂时无法读取，请使用网页导入完成登录。");
+        } else if (data.needCookieImport) {
+          setLoginMode("qq-cookie");
+          setLoginMessage("扫码成功，但腾讯没有返回 QQ 音乐 Cookie。请使用网页 Cookie 导入完成登录。");
+        } else if (data.qrNeedsRefresh) {
+          setQqQrConfigIndex(Number(data.nextQrConfigIndex || 0));
+          setLoginMessage(`${data.qrStatus || "当前扫码配置不可用"}。请点击“刷新二维码”重试。`);
+        } else if (data.qrStatus) {
+          setLoginMessage(data.qrStatus);
+        }
+      } catch (error) {
+        setLoginMessage(error.message || "QQ 音乐二维码状态检查失败");
+      }
+    }, 1800);
+    return () => window.clearInterval(timer);
+  }, [isQqMusicLoggedIn, loginMode, loginOpen, loginProvider, qqMusicState?.qrLoginType, qqMusicState?.qrSig]);
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -784,7 +892,7 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ track, prompt: "", voice: "alloy" })
       });
-      const data = await response.json();
+      const data = await readJsonResponse(response);
       if (!response.ok) throw new Error(data.error || "单曲播客生成失败");
       source = data.podcastAudioUrl || data.outputUrl || "";
       queue[index] = { ...track, ...data };
@@ -841,13 +949,14 @@ function App() {
 
   async function openLoginPanel(mode = "qr") {
     setLoginOpen(true);
+    setLoginProvider("netease");
     setLoginMode(mode);
     setLoginMessage("");
     if (mode !== "qr") return;
     setLoginBusy(true);
     try {
       const response = await fetch("/api/netease/login/start", { method: "POST" });
-      const data = await response.json();
+      const data = await readJsonResponse(response);
       if (!response.ok) throw new Error(data.error || "二维码生成失败");
       setNeteaseState(data);
       setLoginMessage("请用网易云音乐扫码登录");
@@ -867,7 +976,7 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone, countrycode: "86" })
       });
-      const data = await response.json();
+      const data = await readJsonResponse(response);
       if (!response.ok || data.ok === false) {
         const riskText = data.risk ? "网易云判定手机号云端登录存在风险，请优先使用扫码登录或在 Vercel 配置 NETEASE_COOKIE。" : "";
         throw new Error(riskText || data.error || data.payload?.message || data.payload?.msg || "验证码发送失败");
@@ -890,7 +999,7 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone, captcha, countrycode: "86" })
       });
-      const data = await response.json();
+      const data = await readJsonResponse(response);
       if (!response.ok || data.ok === false) {
         const riskText = data.risk ? "网易云判定手机号云端登录存在风险，请优先使用扫码登录或在 Vercel 配置 NETEASE_COOKIE。" : "";
         throw new Error(riskText || data.error || data.payload?.message || data.payload?.msg || "手机号登录失败");
@@ -900,7 +1009,7 @@ function App() {
       setLoginOpen(false);
       setLoginMessage("");
       flash("网易云登录成功，正在同步歌单");
-      await loadNeteaseLibrary().catch(() => null);
+      await loadAllLibraries().catch(() => null);
     } catch (error) {
       setLoginMessage(error.message || "手机号登录失败");
     } finally {
@@ -912,14 +1021,121 @@ function App() {
     setLoginBusy(true);
     try {
       const response = await fetch("/api/netease/logout", { method: "POST" });
-      const data = await response.json();
+      const data = await readJsonResponse(response);
       if (!response.ok) throw new Error(data.error || "退出失败");
       setNeteaseState(data);
-      setLibraryTracks([]);
+      await loadAllLibraries().catch(() => setLibraryTracks([]));
       setLoginOpen(false);
       flash("已退出网易云");
     } catch (error) {
       flash(error.message || "退出失败");
+    } finally {
+      setLoginBusy(false);
+    }
+  }
+
+  function openQqMusicLoginPanel() {
+    setLoginOpen(true);
+    setLoginProvider("qq");
+    setLoginMode("qq-qr");
+    setLoginMessage("点击生成二维码后扫码登录。若 QQ 扫码无法确认，可切换微信扫码或网页导入。");
+  }
+
+  function showQqMusicQrPanel() {
+    setLoginProvider("qq");
+    setLoginMode("qq-qr");
+    setQqMusicState((state) => (state ? { ...state, qrSig: "", qrImg: "", qrStatus: "", qrLoginType: "qq" } : state));
+    setLoginMessage("点击生成二维码后，用手机 QQ 扫码。若确认后仍无法完成，请切换微信扫码。");
+  }
+
+  function showQqMusicWxQrPanel() {
+    setLoginProvider("qq");
+    setLoginMode("qq-wx-qr");
+    setQqMusicState((state) => (state ? { ...state, qrSig: "", qrImg: "", qrStatus: "", qrLoginType: "wx" } : state));
+    setLoginMessage("点击生成二维码后，用微信扫码确认 QQ 音乐登录。");
+  }
+
+  async function startQqMusicQrLogin(configIndex = qqQrConfigIndex) {
+    const nextConfigIndex = Number.isFinite(Number(configIndex)) ? Number(configIndex) : qqQrConfigIndex;
+    const loginType = qqQrLoginTypeFromMode(loginMode);
+    setLoginBusy(true);
+    setLoginMessage("");
+    try {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 12000);
+      const response = await fetch("/api/qqmusic/login/qr/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ configIndex: nextConfigIndex, loginType }),
+        signal: controller.signal
+      });
+      window.clearTimeout(timeout);
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "QQ 音乐二维码生成失败");
+      setQqMusicState(data);
+      setQqQrConfigIndex(Number(data.qrConfigIndex || nextConfigIndex || 0));
+      setLoginMode(loginType === "wx" ? "qq-wx-qr" : "qq-qr");
+      setLoginMessage(`请使用${loginType === "wx" ? "微信" : "手机 QQ"}扫码${data.qrConfigLabel ? `（${data.qrConfigLabel}）` : ""}。`);
+    } catch (error) {
+      setLoginMode(loginType === "wx" ? "qq-wx-qr" : "qq-qr");
+      setLoginMessage(error.name === "AbortError" ? "QQ 音乐二维码生成超时，可以重试或切换网页 Cookie 导入。" : error.message || "QQ 音乐二维码生成失败，可以重试或切换网页 Cookie 导入。");
+    } finally {
+      setLoginBusy(false);
+    }
+  }
+
+  async function loginWithQqCookie(event) {
+    event?.preventDefault?.();
+    await loginWithQqCookieValue(qqCookie);
+  }
+
+  async function loginWithQqCookieValue(cookieValue) {
+    setLoginBusy(true);
+    setLoginMessage("");
+    try {
+      const response = await fetch("/api/qqmusic/login/cookie", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cookie: cookieValue })
+      });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "QQ 音乐登录失败");
+      setQqMusicState(data);
+      setQqCookie("");
+      setLoginOpen(false);
+      flash("QQ 音乐登录成功，正在同步歌单");
+      await loadAllLibraries().catch(() => null);
+    } catch (error) {
+      setLoginMessage(error.message || "QQ 音乐登录失败");
+    } finally {
+      setLoginBusy(false);
+    }
+  }
+
+  async function copyQqMusicImportScript() {
+    const targetUrl = `${window.location.origin}${window.location.pathname}`;
+    const script = `javascript:(()=>{location.href=${JSON.stringify(targetUrl)}+'#qqmusic_cookie='+encodeURIComponent(document.cookie)})()`;
+    try {
+      await navigator.clipboard?.writeText(script);
+      setLoginMessage("导入脚本已复制。打开已登录的 QQ 音乐网页版，把脚本粘贴到地址栏执行。");
+    } catch (_error) {
+      setQqCookie(script);
+      setLoginMessage("复制失败，脚本已放入输入框，请手动复制。");
+    }
+  }
+
+  async function logoutQqMusic() {
+    setLoginBusy(true);
+    try {
+      const response = await fetch("/api/qqmusic/logout", { method: "POST" });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "QQ 音乐退出失败");
+      setQqMusicState(data);
+      await loadAllLibraries().catch(() => setLibraryTracks([]));
+      setLoginOpen(false);
+      flash("已退出 QQ 音乐");
+    } catch (error) {
+      flash(error.message || "QQ 音乐退出失败");
     } finally {
       setLoginBusy(false);
     }
@@ -1028,14 +1244,24 @@ function App() {
           </button>
         ))}
         <span className="stat">{playlistCount || 0} 歌单 · {libraryTracks.length || 0} 首</span>
-        {isLoggedIn ? (
-          <div className="login-chip">
-            <span>{neteaseState?.profile?.nickname || neteaseState?.uid || "网易云已登录"}</span>
-            <button type="button" onClick={logoutNetease} aria-label="退出网易云">退出</button>
-          </div>
-        ) : (
-          <button className="login-entry" onClick={() => openLoginPanel("qr")} type="button">网易云登录</button>
-        )}
+        <div className="login-actions">
+          {isNeteaseLoggedIn ? (
+            <div className="login-chip">
+              <span>{neteaseState?.profile?.nickname || neteaseState?.uid || "网易云已登录"}</span>
+              <button type="button" onClick={logoutNetease} aria-label="退出网易云">退出</button>
+            </div>
+          ) : (
+            <button className="login-entry" onClick={() => openLoginPanel("qr")} type="button">网易云登录</button>
+          )}
+          {isQqMusicLoggedIn ? (
+            <div className="login-chip qq">
+              <span>{qqMusicState?.profile?.creator?.hostname || qqMusicState?.profile?.nick || qqMusicState?.uin || "QQ 音乐已登录"}</span>
+              <button type="button" onClick={logoutQqMusic} aria-label="退出 QQ 音乐">退出</button>
+            </div>
+          ) : (
+            <button className="login-entry qq" onClick={openQqMusicLoginPanel} type="button">QQ 音乐登录</button>
+          )}
+        </div>
         <button className="ui-hide-btn" onClick={() => setUiHidden(true)} type="button">隐藏界面 · H</button>
       </header>
       )}
@@ -1096,33 +1322,66 @@ function App() {
       )}
 
       {!uiHidden && loginOpen && (
-        <section className="login-panel" role="dialog" aria-modal="true" aria-label="网易云登录">
+        <section className="login-panel" role="dialog" aria-modal="true" aria-label="音乐平台登录">
           <button className="panel-close" aria-label="关闭登录面板" type="button" onClick={() => setLoginOpen(false)}>×</button>
-          <div className="login-title">网易云登录</div>
-          <div className="login-tabs">
-            <button className={loginMode === "qr" ? "on" : ""} type="button" onClick={() => openLoginPanel("qr")}>扫码</button>
-            <button className={loginMode === "phone" ? "on" : ""} type="button" onClick={() => setLoginMode("phone")}>手机验证码</button>
+          <div className="login-title">{loginProvider === "qq" ? "QQ 音乐登录" : "网易云登录"}</div>
+          <div className="login-provider-tabs">
+            <button className={loginProvider === "netease" ? "on" : ""} type="button" onClick={() => openLoginPanel("qr")}>网易云</button>
+            <button className={loginProvider === "qq" ? "on" : ""} type="button" onClick={openQqMusicLoginPanel}>QQ 音乐</button>
           </div>
-          {loginMode === "qr" ? (
-            <div className="qr-login">
-              <div className="qr-box">
-                {neteaseState?.qrImg ? <img src={neteaseState.qrImg} alt="网易云登录二维码" /> : <span>{loginBusy ? "生成中" : "点击刷新二维码"}</span>}
+          {loginProvider === "qq" ? (
+            <>
+              <div className="login-tabs">
+                <button className={loginMode === "qq-qr" ? "on" : ""} type="button" onClick={showQqMusicQrPanel}>QQ 扫码</button>
+                <button className={loginMode === "qq-wx-qr" ? "on" : ""} type="button" onClick={showQqMusicWxQrPanel}>微信扫码</button>
+                <button className={loginMode === "qq-cookie" ? "on" : ""} type="button" onClick={() => setLoginMode("qq-cookie")}>网页导入</button>
               </div>
-              <button className="login-action" type="button" onClick={() => openLoginPanel("qr")} disabled={loginBusy}>
-                {neteaseState?.qrImg ? "刷新二维码" : "生成二维码"}
-              </button>
-            </div>
+              {isQqQrLoginMode(loginMode) ? (
+                <div className="qr-login">
+                  <div className="qr-box">
+                    {qqMusicState?.qrImg ? <img src={qqMusicState.qrImg} alt="QQ 音乐登录二维码" /> : <span>{loginBusy ? "生成中" : "点击刷新二维码"}</span>}
+                  </div>
+                  <button className="login-action" type="button" onClick={() => startQqMusicQrLogin()} disabled={loginBusy}>
+                    {qqMusicState?.qrImg ? "刷新二维码" : `生成${loginMode === "qq-wx-qr" ? "微信" : "QQ"}二维码`}
+                  </button>
+                </div>
+              ) : (
+                <form className="phone-login qq-cookie-login" onSubmit={loginWithQqCookie}>
+                  <button className="login-action" type="button" onClick={copyQqMusicImportScript} disabled={loginBusy}>复制 QQ 网页自动导入脚本</button>
+                  <a className="qq-open-link" href="https://y.qq.com" target="_blank" rel="noreferrer">打开 QQ 音乐网页版</a>
+                  <textarea value={qqCookie} onChange={(event) => setQqCookie(event.target.value)} placeholder="也可以手动粘贴 https://y.qq.com 登录后的 Cookie，例如 uin=...; qm_keyst=...; qqmusic_key=..." />
+                  <button className="login-action" type="submit" disabled={loginBusy}>登录并同步 QQ 歌单</button>
+                </form>
+              )}
+            </>
           ) : (
-            <form className="phone-login" onSubmit={loginWithPhone}>
-              <input value={phone} onChange={(event) => setPhone(event.target.value)} inputMode="tel" placeholder="手机号码" />
-              <div className="captcha-row">
-                <input value={captcha} onChange={(event) => setCaptcha(event.target.value)} inputMode="numeric" placeholder="验证码" />
-                <button type="button" onClick={sendCaptcha} disabled={loginBusy}>发送验证码</button>
+            <>
+              <div className="login-tabs">
+                <button className={loginMode === "qr" ? "on" : ""} type="button" onClick={() => openLoginPanel("qr")}>扫码</button>
+                <button className={loginMode === "phone" ? "on" : ""} type="button" onClick={() => setLoginMode("phone")}>手机验证码</button>
               </div>
-              <button className="login-action" type="submit" disabled={loginBusy}>登录并同步歌单</button>
-            </form>
+              {loginMode === "qr" ? (
+                <div className="qr-login">
+                  <div className="qr-box">
+                    {neteaseState?.qrImg ? <img src={neteaseState.qrImg} alt="网易云登录二维码" /> : <span>{loginBusy ? "生成中" : "点击刷新二维码"}</span>}
+                  </div>
+                  <button className="login-action" type="button" onClick={() => openLoginPanel("qr")} disabled={loginBusy}>
+                    {neteaseState?.qrImg ? "刷新二维码" : "生成二维码"}
+                  </button>
+                </div>
+              ) : (
+                <form className="phone-login" onSubmit={loginWithPhone}>
+                  <input value={phone} onChange={(event) => setPhone(event.target.value)} inputMode="tel" placeholder="手机号码" />
+                  <div className="captcha-row">
+                    <input value={captcha} onChange={(event) => setCaptcha(event.target.value)} inputMode="numeric" placeholder="验证码" />
+                    <button type="button" onClick={sendCaptcha} disabled={loginBusy}>发送验证码</button>
+                  </div>
+                  <button className="login-action" type="submit" disabled={loginBusy}>登录并同步歌单</button>
+                </form>
+              )}
+            </>
           )}
-          <p className="login-message">{loginMessage || "登录后会把你的网易云歌单变成星云中的歌曲点。"}</p>
+          <p className="login-message">{loginMessage || (loginProvider === "qq" ? "优先尝试扫码；如果腾讯没有返回音乐站 Cookie，请使用网页导入完成登录。" : "登录后会把你的网易云歌单变成星云中的歌曲点。")}</p>
         </section>
       )}
 

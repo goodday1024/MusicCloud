@@ -14,9 +14,15 @@ Set these in Vercel Project Settings:
 - `OPENAI_TTS_MODEL`
 - `OPENAI_TTS_VOICE`
 - `MUSIC_API_BASE_URL`
+- `WP_MUSIC_API_BASE_URL`
+- `QQMUSIC_API1_BASE_URL`
 - `NETEASE_API_BASE_URL`
 - `MUSIC_API_DEFAULT_PLATFORM=netease`
 - `MUSIC_API_PLATFORMS=netease`
+
+`QQMUSIC_API1_BASE_URL` points to a running [goodday1024/QQMusicApi1](https://github.com/goodday1024/QQMusicApi1) Web service, for example `http://localhost:8080`. CaelumShao prefers this service for QQ scan login, QQ search, and QQ song URLs.
+
+`WP_MUSIC_API_BASE_URL` points to a running [GitHub-ZC/wp_MusicApi](https://github.com/GitHub-ZC/wp_MusicApi) service, for example `http://localhost:5000` locally or your deployed service URL. CaelumShao uses wp_MusicApi as a fallback for QQ search/play URLs, then falls back to the older PHP music API and SDK paths.
 
 ## Recommended
 
@@ -27,6 +33,15 @@ Create a Vercel Blob store for the project. Without Blob, generated podcast file
 - `NETEASE_COOKIE`
 
 Paste a valid NetEase Cloud Music cookie if you want stable playlist access on Vercel. QR/phone login can still work, but serverless file state is temporary.
+
+- `QQMUSIC_COOKIE`
+
+Paste a valid QQ Music web cookie from `https://y.qq.com` if you want stable QQ Music playlist access on Vercel. The app also includes an experimental QQ scan login, but Tencent may not always return `qm_keyst` / `qqmusic_key` through that flow, so cookie import is still the reliable fallback.
+
+- `QQMUSIC_QR_APPID`
+- `QQMUSIC_QR_CALLBACK`
+
+Optional overrides for the experimental QQ scan login. Defaults are suitable for trying the QQ Music web login flow.
 
 For QR login, set:
 

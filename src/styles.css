@@ -155,6 +155,12 @@ canvas {
   border-color: rgba(255, 210, 122, 0.5);
 }
 
+.login-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 .login-entry,
 .login-chip {
   color: var(--gold);
@@ -166,6 +172,13 @@ canvas {
   font-weight: 700;
   white-space: nowrap;
   box-shadow: 0 0 22px rgba(255, 210, 122, 0.08);
+}
+
+.login-entry.qq,
+.login-chip.qq {
+  color: #baf7d2;
+  background: rgba(35, 211, 137, 0.1);
+  border-color: rgba(35, 211, 137, 0.36);
 }
 
 .login-chip {
@@ -479,6 +492,29 @@ canvas {
   margin-bottom: 16px;
 }
 
+.login-provider-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.login-provider-tabs button {
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 999px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.login-provider-tabs button.on {
+  color: #090b12;
+  background: var(--gold);
+  border-color: var(--gold);
+}
+
 .login-tabs button,
 .login-action,
 .captcha-row button {
@@ -525,7 +561,8 @@ canvas {
   padding: 10px;
 }
 
-.phone-login input {
+.phone-login input,
+.qq-cookie-login textarea {
   width: 100%;
   color: var(--fg);
   background: rgba(8, 10, 18, 0.78);
@@ -535,8 +572,27 @@ canvas {
   padding: 10px 12px;
 }
 
-.phone-login input:focus {
+.qq-cookie-login textarea {
+  min-height: 98px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.phone-login input:focus,
+.qq-cookie-login textarea:focus {
   border-color: rgba(255, 210, 122, 0.5);
+}
+
+.qq-open-link {
+  color: #baf7d2;
+  text-align: center;
+  text-decoration: none;
+  border: 1px solid rgba(35, 211, 137, 0.32);
+  border-radius: 9px;
+  padding: 8px 10px;
+  background: rgba(35, 211, 137, 0.08);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .captcha-row {
@@ -921,6 +977,20 @@ button.copy-btn {
   .seg-btn,
   .filter {
     padding: 7px 11px;
+  }
+
+  .login-actions {
+    order: 20;
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .login-entry,
+  .login-chip {
+    width: 100%;
+    justify-content: space-between;
+    min-width: 0;
   }
 
   .search {
