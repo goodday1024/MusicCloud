@@ -641,6 +641,10 @@ async function fetchNeteaseProxy(pathname, { method = "GET", body } = {}) {
   const text = await response.text();
   const payload = text ? JSON.parse(text) : {};
   if (!response.ok) throw new Error(payload?.message || payload?.msg || `网易云代理接口失败：${response.status}`);
+  Object.defineProperty(payload, "__cookies", {
+    value: parseSetCookies(response.headers),
+    enumerable: false
+  });
   return payload;
 }
 
@@ -700,7 +704,7 @@ async function startNeteaseLogin() {
           qrUrl: createData.qrurl || `https://music.163.com/login?codekey=${key}`,
           qrProvider: proxyBase,
           qrStatus: "",
-          loggedIn: false,
+          loggedIn: Boolean(state.cookies?.length),
           updatedAt: new Date().toISOString()
         };
         await saveNeteaseState(nextState);
@@ -869,12 +873,17 @@ async function checkNeteaseLogin(key) {
     try {
       const payload = await fetchNeteaseProxy(`/login/qr/check?key=${encodeURIComponent(qrKey)}`);
       const code = payload?.code ?? payload?.data?.code ?? 0;
-      const cookie = normalizeCookieList(payload?.cookie || payload?.data?.cookie || "");
+      const cookie = normalizeCookieList([
+        ...(Array.isArray(payload.__cookies) ? payload.__cookies : []),
+        ...(Array.isArray(payload?.cookie) ? payload.cookie : normalizeCookieList(payload?.cookie || "")),
+        ...(Array.isArray(payload?.data?.cookie) ? payload.data.cookie : normalizeCookieList(payload?.data?.cookie || ""))
+      ]);
+      const hasUsableCookie = cookie.length > 0 || Boolean(state.cookies?.length);
       const status = {
         ...state,
         qrKey,
         cookies: cookie.length ? cookie : state.cookies || [],
-        loggedIn: code === 803 || code === 200,
+        loggedIn: (code === 803 || code === 200) && hasUsableCookie,
         qrStatus: payload?.message || payload?.msg || payload?.data?.message || "",
         updatedAt: new Date().toISOString()
       };
