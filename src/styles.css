@@ -100,6 +100,38 @@ canvas {
   pointer-events: auto;
 }
 
+.top-lyric {
+  position: fixed;
+  top: 62px;
+  left: 50%;
+  z-index: 23;
+  max-width: min(760px, calc(100vw - 440px));
+  transform: translateX(-50%);
+  pointer-events: none;
+  padding: 8px 18px;
+  border: 1px solid rgba(255, 210, 122, 0.18);
+  border-radius: 999px;
+  color: #fff8e6;
+  background:
+    radial-gradient(circle at 50% 0, rgba(255, 210, 122, 0.18), transparent 70%),
+    rgba(5, 7, 13, 0.52);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 12px 46px rgba(0, 0, 0, 0.34), 0 0 28px rgba(255, 210, 122, 0.08);
+  animation: lyricFloat 0.28s ease-out;
+}
+
+.top-lyric span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+  font-family: var(--serif);
+  font-size: 20px;
+  letter-spacing: 0.08em;
+  text-shadow: 0 0 16px rgba(255, 210, 122, 0.28), 0 2px 10px rgba(0, 0, 0, 0.68);
+}
+
 .title {
   letter-spacing: 0.18em;
   color: var(--gold);
@@ -1052,6 +1084,13 @@ button.copy-btn {
   }
 }
 
+@keyframes lyricFloat {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -8px) scale(0.98);
+  }
+}
+
 @keyframes warpRain {
   from {
     transform: perspective(520px) rotateX(24deg) translateY(-120px);
@@ -1168,6 +1207,17 @@ button.copy-btn {
     max-width: none;
     left: 8px;
     right: 8px;
+  }
+
+  .top-lyric {
+    top: 68px;
+    max-width: calc(100vw - 24px);
+    padding: 7px 13px;
+  }
+
+  .top-lyric span {
+    font-size: 16px;
+    letter-spacing: 0.04em;
   }
 
   .song-sphere {

@@ -830,6 +830,7 @@ function App() {
   const [audioTime, setAudioTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [lyricSegments, setLyricSegments] = useState([]);
   const [energy, setEnergy] = useState(0.08);
   const [message, setMessage] = useState("");
   const [isLibraryLoading, setIsLibraryLoading] = useState(false);
@@ -917,6 +918,12 @@ function App() {
   const displayTrack = panelOpen ? infoTrack || selectedTrack || filteredTracks[0] || libraryTracks[0] || null : null;
   const playlistCount = new Set(libraryTracks.map((track) => track.playlistId).filter(Boolean)).size;
   const titleLines = splitTitle(displayTrack?.title || BRAND_CN);
+  const currentLyricLine = useMemo(() => {
+    if (!isPlaying || !lyricSegments.length) return null;
+    return lyricSegments.find((segment) => audioTime >= Number(segment.start || 0) && audioTime < Number(segment.end || Number(segment.start || 0) + 4))
+      || [...lyricSegments].reverse().find((segment) => Number(segment.start || 0) <= audioTime)
+      || null;
+  }, [audioTime, isPlaying, lyricSegments]);
 
   function playbackSourceTracks() {
     const source = viewMode === "拾遗"
@@ -941,6 +948,26 @@ function App() {
       seen.add(key);
       return true;
     });
+  }
+
+  async function loadLyricsForTrack(track, token) {
+    if (!track?.id) return;
+    try {
+      const response = await fetch("/api/lyrics", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: track.id,
+          platform: track.platform || track.sourcePlatform || "netease"
+        })
+      });
+      const data = await readJsonResponse(response);
+      if (token !== playTokenRef.current) return;
+      setLyricSegments(Array.isArray(data.segments) ? data.segments : []);
+    } catch (error) {
+      if (token === playTokenRef.current) setLyricSegments([]);
+      console.debug("lyrics unavailable", error?.message || error);
+    }
   }
 
   async function refreshNeteaseState() {
@@ -1213,6 +1240,7 @@ function App() {
     setSelectedTrack(track);
     setPlayerTitle(track.title || BRAND_CN);
     setPlayerArtist(track.artist || track.playlistName || "podcast mix");
+    setLyricSegments([]);
     setMessage(`正在准备播放 ${index + 1}/${queue.length || 1}`);
 
     const playSourceNow = (nextSource, nextMessage = "") => {
@@ -1248,6 +1276,7 @@ function App() {
         queue[index] = { ...track, musicUrl: originalUrl };
         queueRef.current = [...queue];
         setTrackQueue([...queue]);
+        void loadLyricsForTrack(track, token);
         window.setTimeout(() => {
           if (token === playTokenRef.current) void startTtsPodcastOverlay({ ...track, musicUrl: originalUrl }, token);
         }, 1200);
@@ -1744,6 +1773,11 @@ function App() {
   return (
     <main className="app cloud-stage">
       <div className="space-field" />
+      {currentLyricLine?.text && (
+        <div className="top-lyric" aria-live="polite">
+          <span>{currentLyricLine.text}</span>
+        </div>
+      )}
       {!uiHidden && (
       <header className="hud-top">
         <div className="title">
