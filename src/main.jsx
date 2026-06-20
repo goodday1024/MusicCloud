@@ -958,7 +958,10 @@ function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: track.id,
-          platform: track.platform || track.sourcePlatform || "netease"
+          platform: track.platform || track.sourcePlatform || "netease",
+          mediaId: track.mediaId || track.media_mid || track.raw?.strMediaMid || track.raw?.media_mid || "",
+          songId: track.songId || track.songid || track.raw?.songid || "",
+          raw: track.raw || null
         })
       });
       const data = await readJsonResponse(response);

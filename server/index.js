@@ -2011,16 +2011,114 @@ function parseLrc(lyricText, songDuration = 0) {
   return unique;
 }
 
-async function fetchLyrics({ id, platform }) {
-  if (!id || platform !== "netease") return [];
-  const state = await readNeteaseState().catch(() => null);
-  const cookie = cookieHeaderFromState(state);
+async function fetchLyrics({ id, platform, mediaId = "", songId = "", raw = null }) {
+  if (!id) return [];
+  const source = String(platform || "").toLowerCase();
+  if (source === "qq") {
+    return fetchQQMusicLyrics({ id, mediaId, songId, raw }).catch(() => []);
+  }
+  if (source === "netease") {
+    const state = await readNeteaseState().catch(() => null);
+    const cookie = cookieHeaderFromState(state);
+    try {
+      const resp = await neteaseApi.lyric({ id, cookie }).catch(() => null);
+      const lrc = resp?.body?.lrc?.lyric || resp?.body?.lrc || resp?.body?.lyric || "";
+      if (!lrc) return [];
+      return parseLrc(lrc);
+    } catch (e) {
+      return [];
+    }
+  }
+  return [];
+}
+
+function extractLyricTextFromPayload(payload) {
+  const candidates = [
+    payload?.lyric,
+    payload?.lrc,
+    payload?.lyrics,
+    payload?.song_lyric,
+    payload?.data?.lyric,
+    payload?.data?.lrc,
+    payload?.data?.lyrics,
+    payload?.data?.song_lyric,
+    payload?.data?.data?.lyric,
+    payload?.data?.data?.lrc
+  ];
+  return candidates.map((value) => String(value || "").trim()).find(Boolean) || "";
+}
+
+function decodeBase64Text(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
   try {
-    const resp = await neteaseApi.lyric({ id, cookie }).catch(() => null);
-    const lrc = resp?.body?.lrc?.lyric || resp?.body?.lrc || resp?.body?.lyric || "";
-    if (!lrc) return [];
-    return parseLrc(lrc);
-  } catch (e) {
+    return Buffer.from(text, "base64").toString("utf8");
+  } catch (_error) {
+    return text;
+  }
+}
+
+async function fetchQQOfficialLyrics(songmid) {
+  const url = new URL("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg");
+  url.searchParams.set("songmid", songmid);
+  url.searchParams.set("pcachetime", Date.now());
+  url.searchParams.set("g_tk", "5381");
+  url.searchParams.set("loginUin", "0");
+  url.searchParams.set("hostUin", "0");
+  url.searchParams.set("format", "json");
+  url.searchParams.set("inCharset", "utf8");
+  url.searchParams.set("outCharset", "utf-8");
+  url.searchParams.set("notice", "0");
+  url.searchParams.set("platform", "yqq");
+  url.searchParams.set("needNewCode", "0");
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json,text/plain,*/*",
+      Referer: "https://y.qq.com/",
+      "User-Agent": "Mozilla/5.0"
+    }
+  });
+  const text = await response.text();
+  const jsonText = text.trim().replace(/^callback\(|^MusicJsonCallback\(|^jsonCallback\(|\)$/g, "");
+  const payload = jsonText ? JSON.parse(jsonText) : {};
+  const lyric = decodeBase64Text(payload.lyric || payload.data?.lyric || "");
+  const trans = decodeBase64Text(payload.trans || payload.data?.trans || "");
+  return lyric || trans || "";
+}
+
+async function fetchQQMusicLyrics({ id, mediaId = "", songId = "", raw = null } = {}) {
+  const songmid = String(id || mediaId || raw?.songmid || raw?.mid || raw?.strMediaMid || raw?.media_mid || "").trim();
+  if (!songmid) return [];
+  const state = await readQQMusicState().catch(() => ({}));
+  const credential = qqMusicApi1CredentialFromState(state);
+  const api1Paths = [
+    `/song/${encodeURIComponent(songmid)}/lyric`,
+    `/song/${encodeURIComponent(songmid)}/lyrics`,
+    `/song/${encodeURIComponent(songmid)}/lyric?format=lrc`,
+    `/song/${encodeURIComponent(songmid)}/lyrics?format=lrc`
+  ];
+  if (songId) {
+    api1Paths.push(`/song/${encodeURIComponent(songId)}/lyric`, `/song/${encodeURIComponent(songId)}/lyrics`);
+  }
+  for (const pathCandidate of api1Paths) {
+    const payload = await fetchQQMusicApi1(pathCandidate, { credential }).catch(() => null);
+    const lyric = extractLyricTextFromPayload(payload);
+    const segments = parseLrc(lyric);
+    if (segments.length) return segments;
+  }
+  const officialLyric = await fetchQQOfficialLyrics(songmid).catch((error) => {
+    console.warn("QQ official lyric failed:", error?.message || String(error));
+    return "";
+  });
+  const officialSegments = parseLrc(officialLyric);
+  if (officialSegments.length) return officialSegments;
+  try {
+    const response = await qqMusicApi.api("lyric", { songmid, raw: 1 });
+    const payload = response?.data || response;
+    const lyric = extractLyricTextFromPayload(payload);
+    return parseLrc(lyric);
+  } catch (error) {
+    console.warn("QQ lyric fallback failed:", error?.message || error?.errMsg || JSON.stringify(error || {}));
     return [];
   }
 }
@@ -4710,7 +4808,13 @@ app.post("/api/agent/create", upload.single("track"), async (req, res, next) => 
 
 app.post("/api/lyrics", async (req, res, next) => {
   try {
-    const segments = await fetchLyrics({ id: req.body?.id, platform: req.body?.platform || defaultMusicPlatform });
+    const segments = await fetchLyrics({
+      id: req.body?.id,
+      platform: req.body?.platform || defaultMusicPlatform,
+      mediaId: req.body?.mediaId || req.body?.media_mid || "",
+      songId: req.body?.songId || req.body?.songid || "",
+      raw: req.body?.raw || null
+    });
     res.json({ segments });
   } catch (error) {
     next(error);
