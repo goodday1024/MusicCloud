@@ -539,6 +539,11 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     raycaster.params.Points.threshold = 0.075;
     const pointer = new THREE.Vector2();
     const activePointers = new Map();
+    const pressedKeys = new Set();
+    const cameraRight = new THREE.Vector3();
+    const cameraUp = new THREE.Vector3();
+    const centerDirection = new THREE.Vector3();
+    const panDelta = new THREE.Vector3();
     let dragging = false;
     let lastCenter = null;
     let lastPointerDown = { x: 0, y: 0, time: 0 };
@@ -800,8 +805,39 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       onBlankDoubleClickRef.current?.({ x: event.clientX, y: event.clientY });
     };
 
+    const shouldIgnoreKeyboardPan = () => {
+      const tag = document.activeElement?.tagName?.toLowerCase();
+      return tag === "input" || tag === "textarea" || document.activeElement?.isContentEditable;
+    };
+
+    const onKeyDown = (event) => {
+      if (shouldIgnoreKeyboardPan()) return;
+      const key = event.key.toLowerCase();
+      if (!["w", "a", "s", "d", "arrowup", "arrowleft", "arrowdown", "arrowright"].includes(key)) return;
+      event.preventDefault();
+      pressedKeys.add(key);
+    };
+
+    const onKeyUp = (event) => {
+      pressedKeys.delete(event.key.toLowerCase());
+    };
+
     const animate = () => {
       const closeFocus = jumpingRef.current || deepFocusRef.current;
+      const panSpeed = closeFocus ? 0.026 : 0.018;
+      const depthSpeed = closeFocus ? 0.048 : 0.036;
+      const panX = (pressedKeys.has("d") || pressedKeys.has("arrowright") ? 1 : 0) - (pressedKeys.has("a") || pressedKeys.has("arrowleft") ? 1 : 0);
+      const depth = (pressedKeys.has("w") || pressedKeys.has("arrowup") ? 1 : 0) - (pressedKeys.has("s") || pressedKeys.has("arrowdown") ? 1 : 0);
+      if (panX || depth) {
+        camera.updateMatrixWorld();
+        cameraRight.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+        centerDirection.set(-camera.position.x, -camera.position.y, -camera.position.z).normalize();
+        panDelta.copy(cameraRight).multiplyScalar(panX * panSpeed).addScaledVector(centerDirection, depth * depthSpeed);
+        camera.position.add(panDelta);
+        camera.position.x = Math.max(-3.2, Math.min(3.2, camera.position.x));
+        camera.position.y = Math.max(-2.2, Math.min(2.2, camera.position.y));
+        camera.position.z = Math.max(2.2, Math.min(10.5, camera.position.z));
+      }
       const bounds = zoomBounds();
       wheelZoomTarget = Math.max(bounds.min, Math.min(bounds.max, wheelZoomTarget));
       const jumpBoost = jumpingRef.current ? 0.32 : deepFocusRef.current ? 0.18 : 0;
@@ -822,8 +858,16 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       focusMaterial.opacity = closeFocus ? 0.98 : 0.78;
       focusHaloMaterial.opacity = closeFocus ? 0.78 : 0.62;
       focusCoreMaterial.opacity = closeFocus ? 0.98 : 0.86;
-      dustMaterial.size = closeFocus ? 0.008 : 0.013;
-      trackMaterial.size = closeFocus ? 0.058 : 0.066;
+      const now = performance.now() * 0.001;
+      const farAmount = closeFocus
+        ? 0
+        : Math.max(0, Math.min(1, ((camera.position.z - 5.4) / 4.2) + ((0.92 - wheelZoom) * 1.15)));
+      const dustTwinkle = farAmount * (0.055 * Math.sin(now * 1.7) + 0.032 * Math.sin(now * 3.9 + 1.8));
+      const trackTwinkle = farAmount * (0.07 * Math.sin(now * 2.35 + 0.7) + 0.026 * Math.sin(now * 5.1));
+      dustMaterial.size = (closeFocus ? 0.008 : 0.013) * (1 + farAmount * 0.16 + dustTwinkle);
+      dustMaterial.opacity = closeFocus ? 0.9 : Math.max(0.82, Math.min(1, 0.96 + dustTwinkle));
+      trackMaterial.size = (closeFocus ? 0.058 : 0.066) * (1 + farAmount * 0.12 + trackTwinkle);
+      trackMaterial.opacity = closeFocus ? 0.96 : Math.max(0.86, Math.min(1, 0.98 + trackTwinkle));
       if (!dragging) {
         group.rotation.y += (closeFocus ? 0.00002 : hasFocus ? 0.00008 : 0.00065) + energyRef.current * (closeFocus ? 0.00004 : hasFocus ? 0.00035 : 0.0014);
         group.rotation.x += closeFocus ? 0.00001 : 0;
@@ -842,6 +886,8 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     host.addEventListener("pointercancel", onPointerUp);
     host.addEventListener("wheel", onWheel, { passive: false });
     host.addEventListener("dblclick", onDoubleClick);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
     const onPointerLeave = () => setHover(null);
     host.addEventListener("pointerleave", onPointerLeave);
     window.addEventListener("resize", resize);
@@ -854,6 +900,8 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       host.removeEventListener("pointercancel", onPointerUp);
       host.removeEventListener("wheel", onWheel);
       host.removeEventListener("dblclick", onDoubleClick);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
       host.removeEventListener("pointerleave", onPointerLeave);
       window.removeEventListener("resize", resize);
       runtimeRef.current = null;
@@ -1858,10 +1906,10 @@ function App() {
       setCaptureOrb((current) => current?.id === id ? { ...current, locked: true } : current);
       void playTrackFromUi(picked);
       flash(`捕捉到 ${picked.title || "一首歌"}`);
-    }, 1150);
+    }, 3200);
     window.setTimeout(() => {
       setCaptureOrb((current) => current?.id === id ? null : current);
-    }, 2200);
+    }, 4300);
   }
 
   return (
@@ -2140,7 +2188,7 @@ function App() {
 
       {!uiHidden && (
       <footer className="hud-bottom">
-        <span className="hint">搜索跃迁定位 · 拖拽旋转 · <b>点击歌星</b>播放音乐与播客</span>
+        <span className="hint">搜索跃迁定位 · WASD/方向键移动镜头 · 拖拽旋转 · <b>点击歌星</b>播放音乐与播客</span>
         <span className="speed">{jumping ? "速度 ×1.49 · 星系跃迁中" : deepFocus ? `近距离锁定 · ${jumpTrack?.title || "目标星点"}` : `${isPlaying ? "正在播放" : message || "待命"} · ${formatTime(audioTime)}`}</span>
       </footer>
       )}

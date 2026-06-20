@@ -516,18 +516,18 @@ canvas {
   width: 34px;
   height: 34px;
   transform: translate(-50%, -50%);
-  animation: captureFly 1.16s cubic-bezier(0.16, 0.74, 0.18, 1) forwards;
+  animation: captureFly 3.45s cubic-bezier(0.18, 0.62, 0.16, 1) forwards;
 }
 
 .capture-orb::before {
   content: "";
   position: absolute;
-  inset: -14px -180px -14px -14px;
+  inset: -22px -240px -22px -22px;
   border-radius: 999px;
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.86), rgba(255, 255, 255, 0.22), transparent);
-  filter: blur(8px);
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.64), rgba(255, 255, 255, 0.18), transparent);
+  filter: blur(11px);
   transform-origin: 18px 50%;
-  opacity: 0.78;
+  opacity: 0.58;
 }
 
 .capture-orb span {
@@ -1110,30 +1110,31 @@ button.copy-btn {
 @keyframes captureFly {
   0% {
     opacity: 0;
-    transform: translate(-50%, -50%) scale(0.34);
-    filter: blur(0);
+    transform: translate(-50%, -50%) scale(2.65);
+    filter: blur(2px);
   }
-  14% {
-    opacity: 1;
-    transform: translate(-50%, -50%) scale(1);
+  16% {
+    opacity: 0.88;
+    transform: translate(calc(-50% - 34px), calc(-50% + 18px)) scale(2.05);
   }
-  74% {
-    opacity: 1;
-    left: 50vw;
-    top: 52vh;
-    transform: translate(-50%, -50%) scale(0.72);
+  58% {
+    opacity: 0.94;
+    left: 46vw;
+    top: 49vh;
+    transform: translate(-50%, -50%) scale(0.96);
   }
   100% {
-    opacity: 0.98;
+    opacity: 0.9;
     left: 50vw;
     top: 52vh;
-    transform: translate(-50%, -50%) scale(1.28);
+    transform: translate(-50%, -50%) scale(0.38);
+    filter: blur(0.5px);
   }
 }
 
 @keyframes captureLock {
   to {
-    transform: scale(1.42);
+    transform: scale(0.82);
     box-shadow: 0 0 24px rgba(255, 255, 255, 1), 0 0 92px rgba(255, 210, 122, 0.82);
   }
 }
