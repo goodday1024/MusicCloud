@@ -49,6 +49,13 @@ function platformLabel(platform) {
   return platform || "音乐";
 }
 
+function safeFileName(value, fallback = "caelumshao") {
+  return String(value || fallback)
+    .replace(/[\\/:*?"<>|#%{}[\]^~`]/g, "")
+    .replace(/\s+/g, "-")
+    .slice(0, 48) || fallback;
+}
+
 async function readJsonResponse(response, fallbackMessage = "接口请求失败") {
   const text = await response.text();
   const contentType = response.headers.get("content-type") || "";
@@ -215,7 +222,7 @@ function nebulaLayerColor(point) {
   return color;
 }
 
-function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false, jumping = false, deepFocus = false, globalMode = false, qualityMode = "low", artistQuery = "", onSelect, onHover }) {
+function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false, jumping = false, deepFocus = false, globalMode = false, qualityMode = "low", artistQuery = "", onSelect, onHover, onBlankDoubleClick }) {
   const mountRef = useRef(null);
   const runtimeRef = useRef(null);
   const tracksRef = useRef(tracks);
@@ -228,6 +235,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
   const globalModeRef = useRef(globalMode);
   const qualityModeRef = useRef(qualityMode);
   const artistQueryRef = useRef(artistQuery);
+  const onBlankDoubleClickRef = useRef(onBlankDoubleClick);
 
   useEffect(() => {
     tracksRef.current = tracks;
@@ -246,6 +254,10 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
   useEffect(() => {
     onHoverRef.current = onHover;
   }, [onHover]);
+
+  useEffect(() => {
+    onBlankDoubleClickRef.current = onBlankDoubleClick;
+  }, [onBlankDoubleClick]);
 
   useEffect(() => {
     energyRef.current = energy;
@@ -419,7 +431,9 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       const ctx = canvas.getContext("2d");
       const gradient = ctx.createRadialGradient(32, 32, 1, 32, 32, 30);
       gradient.addColorStop(0, "rgba(255,255,255,1)");
-      gradient.addColorStop(0.58, "rgba(255,255,255,0.92)");
+      gradient.addColorStop(0.24, "rgba(255,255,255,0.98)");
+      gradient.addColorStop(0.5, "rgba(255,235,168,0.58)");
+      gradient.addColorStop(0.78, "rgba(255,205,104,0.18)");
       gradient.addColorStop(1, "rgba(255,255,255,0)");
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, 64, 64);
@@ -438,11 +452,11 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       depthWrite: false
     });
     const trackMaterial = new THREE.PointsMaterial({
-      size: 0.045,
+      size: 0.066,
       map: pointTexture,
       sizeAttenuation: true,
       transparent: true,
-      opacity: 0.96,
+      opacity: 1,
       vertexColors: true,
       blending: THREE.AdditiveBlending,
       depthWrite: false
@@ -468,6 +482,13 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     let wheelZoom = 1;
     let wheelZoomTarget = 1;
     let raf = 0;
+    const zoomBounds = () => {
+      const closeFocus = jumpingRef.current || deepFocusRef.current;
+      return {
+        min: closeFocus ? 0.18 : 0.42,
+        max: closeFocus ? 2.85 : 3.1
+      };
+    };
 
     const resize = () => {
       const rect = host.getBoundingClientRect();
@@ -602,7 +623,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
         trackPositions[index * 3 + 1] = lifted.y;
         trackPositions[index * 3 + 2] = lifted.z;
         color.copy(isSearchGold ? goldColor : track.artistCenter || isActive ? coreStarColor : isHover ? hoverStarColor : nebulaLayerColor(lifted));
-        const boost = isSearchGold ? (track.artistCenter ? 3.8 : 2.45) : track.artistCenter ? 2.2 : isActive ? 1.6 : isHover ? 1.35 : globalModeRef.current ? 0.42 : 0.88;
+        const boost = isSearchGold ? (track.artistCenter ? 4.25 : 2.9) : track.artistCenter ? 2.6 : isActive ? 2.15 : isHover ? 1.75 : globalModeRef.current ? 0.62 : 1.15;
         trackColors[index * 3] = color.r * boost;
         trackColors[index * 3 + 1] = color.g * boost;
         trackColors[index * 3 + 2] = color.b * boost;
@@ -707,13 +728,21 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       event.preventDefault();
       const direction = event.deltaY > 0 ? -1 : 1;
       const factor = direction > 0 ? 1.11 : 0.9;
-      wheelZoomTarget = Math.max(0.55, Math.min(2.85, wheelZoomTarget * factor));
+      const bounds = zoomBounds();
+      wheelZoomTarget = Math.max(bounds.min, Math.min(bounds.max, wheelZoomTarget * factor));
+    };
+
+    const onDoubleClick = (event) => {
+      if (Number.isFinite(hitTest(event))) return;
+      onBlankDoubleClickRef.current?.({ x: event.clientX, y: event.clientY });
     };
 
     const animate = () => {
       const closeFocus = jumpingRef.current || deepFocusRef.current;
+      const bounds = zoomBounds();
+      wheelZoomTarget = Math.max(bounds.min, Math.min(bounds.max, wheelZoomTarget));
       const jumpBoost = jumpingRef.current ? 0.32 : deepFocusRef.current ? 0.18 : 0;
-      const focusScale = hasFocus ? (closeFocus ? 4.85 : 1.52) : 1;
+      const focusScale = hasFocus ? (closeFocus ? 3.75 : 1.52) : 1;
       wheelZoom += (wheelZoomTarget - wheelZoom) * 0.12;
       const pulse = (focusScale + jumpBoost + Math.min(0.06, energyRef.current * 0.06)) * wheelZoom;
       group.scale.lerp(new THREE.Vector3(pulse, pulse, pulse), closeFocus ? 0.115 : 0.075);
@@ -731,7 +760,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       focusHaloMaterial.opacity = closeFocus ? 0.78 : 0.62;
       focusCoreMaterial.opacity = closeFocus ? 0.98 : 0.86;
       dustMaterial.size = closeFocus ? 0.008 : 0.013;
-      trackMaterial.size = closeFocus ? 0.032 : 0.038;
+      trackMaterial.size = closeFocus ? 0.058 : 0.066;
       if (!dragging) {
         group.rotation.y += (closeFocus ? 0.00002 : hasFocus ? 0.00008 : 0.00065) + energyRef.current * (closeFocus ? 0.00004 : hasFocus ? 0.00035 : 0.0014);
         group.rotation.x += closeFocus ? 0.00001 : 0;
@@ -749,6 +778,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     host.addEventListener("pointerup", onPointerUp);
     host.addEventListener("pointercancel", onPointerUp);
     host.addEventListener("wheel", onWheel, { passive: false });
+    host.addEventListener("dblclick", onDoubleClick);
     const onPointerLeave = () => setHover(null);
     host.addEventListener("pointerleave", onPointerLeave);
     window.addEventListener("resize", resize);
@@ -760,6 +790,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       host.removeEventListener("pointerup", onPointerUp);
       host.removeEventListener("pointercancel", onPointerUp);
       host.removeEventListener("wheel", onWheel);
+      host.removeEventListener("dblclick", onDoubleClick);
       host.removeEventListener("pointerleave", onPointerLeave);
       window.removeEventListener("resize", resize);
       runtimeRef.current = null;
@@ -820,7 +851,15 @@ function App() {
       return new Set();
     }
   });
+  const [savedTrackItems, setSavedTrackItems] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("agentio.savedTrackItems") || "{}");
+    } catch (_error) {
+      return {};
+    }
+  });
   const [toast, setToast] = useState("");
+  const [captureOrb, setCaptureOrb] = useState(null);
   const [jumpTrack, setJumpTrack] = useState(null);
   const [jumping, setJumping] = useState(false);
   const [deepFocus, setDeepFocus] = useState(false);
@@ -845,9 +884,13 @@ function App() {
   const isQqMusicLoggedIn = Boolean(qqMusicState?.loggedIn);
   const isLoggedIn = isNeteaseLoggedIn || isQqMusicLoggedIn;
   const showPlayer = Boolean(playerSource || trackQueue.length);
-  const starTracks = useMemo(() => withArtistCenters(globalSearchEnabled ? globalTracks : libraryTracks, globalSearchEnabled), [globalSearchEnabled, globalTracks, libraryTracks]);
+  const starTracks = useMemo(() => {
+    const source = viewMode === "拾遗" ? Object.values(savedTrackItems) : globalSearchEnabled ? globalTracks : libraryTracks;
+    return withArtistCenters(source, globalSearchEnabled && viewMode !== "拾遗");
+  }, [globalSearchEnabled, globalTracks, libraryTracks, savedTrackItems, viewMode]);
   const filteredTracks = useMemo(() => {
     const base = starTracks.filter((track) => {
+      if (viewMode === "拾遗") return !track.artistCenter && savedKeys.has(trackKey(track));
       if (viewMode === "封面" && !track.cover) return false;
       if (viewMode === "年代" && !trackYearValue(track)) return false;
       if (viewMode === "歌单" && !track.playlistName) return false;
@@ -855,7 +898,7 @@ function App() {
       return true;
     });
     return sortVisibleTracks(base, sortMode);
-  }, [sortMode, starTracks, viewMode]);
+  }, [savedKeys, sortMode, starTracks, viewMode]);
   const sphereTracks = globalSearchEnabled ? starTracks : filteredTracks;
   const searchResults = useMemo(() => {
     const q = normalizeText(query);
@@ -875,11 +918,19 @@ function App() {
   const playlistCount = new Set(libraryTracks.map((track) => track.playlistId).filter(Boolean)).size;
   const titleLines = splitTitle(displayTrack?.title || BRAND_CN);
 
+  function playbackSourceTracks() {
+    const source = viewMode === "拾遗"
+      ? Object.values(savedTrackItems)
+      : globalSearchEnabled
+        ? globalTracks
+        : libraryTracks;
+    return source.filter((item) => item && !item.artistCenter && !item.placeholder);
+  }
+
   function buildPlaybackQueue(track) {
     if (!track) return [];
     if (!isLoggedIn) return [track];
-    const source = (globalSearchEnabled ? sphereTracks : filteredTracks)
-      .filter((item) => item && !item.artistCenter && !item.placeholder);
+    const source = playbackSourceTracks();
     const currentKey = trackKey(track);
     const index = source.findIndex((item) => trackKey(item) === currentKey);
     const ordered = index >= 0 ? [...source.slice(index), ...source.slice(0, index)] : [track, ...source];
@@ -1063,7 +1114,7 @@ function App() {
       }
       const nextIndex = queueIndexRef.current + 1;
       if (nextIndex < queueRef.current.length) {
-        void playQueueTrack(nextIndex);
+        void playQueueTrack(nextIndex, { autoAdvance: true });
       } else {
         setIsPlaying(false);
         setMessage("播放完成");
@@ -1151,7 +1202,7 @@ function App() {
     }
   }
 
-  async function playQueueTrack(index) {
+  async function playQueueTrack(index, options = {}) {
     const queue = queueRef.current;
     const track = queue[index];
     if (!track) return;
@@ -1162,7 +1213,7 @@ function App() {
     setSelectedTrack(track);
     setPlayerTitle(track.title || BRAND_CN);
     setPlayerArtist(track.artist || track.playlistName || "podcast mix");
-    setMessage("正在准备播放");
+    setMessage(`正在准备播放 ${index + 1}/${queue.length || 1}`);
 
     const playSourceNow = (nextSource, nextMessage = "") => {
       if (token !== playTokenRef.current || !nextSource) return false;
@@ -1192,7 +1243,7 @@ function App() {
 
     try {
       const originalUrl = track.musicUrl || track.url || await resolveOriginal();
-      const started = playSourceNow(originalUrl, "音乐已播放，正在后台生成播客");
+      const started = playSourceNow(originalUrl, `音乐已播放 ${index + 1}/${queue.length || 1}，正在后台生成播客`);
       if (started) {
         queue[index] = { ...track, musicUrl: originalUrl };
         queueRef.current = [...queue];
@@ -1203,6 +1254,10 @@ function App() {
       }
     } catch (error) {
       console.warn("quick original playback failed:", error?.message || error);
+      if (options.autoAdvance && index + 1 < queueRef.current.length) {
+        setMessage(`跳过无法播放的歌曲：${track.title || "未知歌曲"}`);
+        return playQueueTrack(index + 1, options);
+      }
       throw error;
     }
   }
@@ -1539,48 +1594,151 @@ function App() {
 
   async function shareTrack() {
     if (!displayTrack) return;
-    const text = `${BRAND_CN} · ${displayTrack.title || "歌曲"} - ${displayTrack.artist || "未知艺人"}`;
+    const title = `${BRAND_CN} · ${displayTrack.title || "歌曲"}`;
+    const text = [
+      `${displayTrack.title || "歌曲"} - ${displayTrack.artist || "未知艺人"}`,
+      displayTrack.album ? `专辑：${displayTrack.album}` : "",
+      displayTrack.playlistName ? `星图：${displayTrack.playlistName}` : "",
+      `来自 ${BRAND_CN} ${BRAND_EN}`
+    ].filter(Boolean).join("\n");
     try {
-      await navigator.clipboard?.writeText(text);
-      flash("已复制分享文本");
-    } catch (_error) {
-      flash(text);
+      if (navigator.share) {
+        await navigator.share({ title, text, url: window.location.href });
+        flash("分享已唤起");
+      } else {
+        await navigator.clipboard?.writeText(`${text}\n${window.location.href}`);
+        flash("已复制分享文本");
+      }
+    } catch (error) {
+      if (error?.name !== "AbortError") flash("分享失败，已保留当前星歌");
     }
   }
 
-  function saveSnapshot() {
+  async function saveSnapshot() {
     if (!displayTrack) return;
-    const payload = {
-      title: displayTrack.title || BRAND_CN,
-      artist: displayTrack.artist || "",
-      album: displayTrack.album || "",
-      playlist: displayTrack.playlistName || "",
-      year: displayTrack.year || "",
-      savedAt: new Date().toISOString()
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${displayTrack.title || "agentio"}-snapshot.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-    flash("留影已下载");
+    const canvas = document.createElement("canvas");
+    canvas.width = 1280;
+    canvas.height = 720;
+    const ctx = canvas.getContext("2d");
+    const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+    gradient.addColorStop(0, "#06080d");
+    gradient.addColorStop(0.48, "#0b1711");
+    gradient.addColorStop(1, "#170711");
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    for (let i = 0; i < 900; i += 1) {
+      const x = (seededNoise(i + 42) * canvas.width);
+      const y = (seededNoise(i + 440) * canvas.height);
+      const r = 0.45 + seededNoise(i + 88) * 1.4;
+      ctx.fillStyle = i % 5 === 0 ? "rgba(255,210,122,0.62)" : "rgba(255,255,255,0.42)";
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    const cx = canvas.width * 0.64;
+    const cy = canvas.height * 0.52;
+    const halo = ctx.createRadialGradient(cx, cy, 8, cx, cy, 230);
+    halo.addColorStop(0, "rgba(255,255,255,0.98)");
+    halo.addColorStop(0.16, "rgba(255,210,122,0.68)");
+    halo.addColorStop(0.44, "rgba(255,210,122,0.18)");
+    halo.addColorStop(1, "rgba(255,210,122,0)");
+    ctx.fillStyle = halo;
+    ctx.fillRect(cx - 260, cy - 260, 520, 520);
+
+    if (displayTrack.cover) {
+      try {
+        const image = new Image();
+        image.crossOrigin = "anonymous";
+        image.src = displayTrack.cover;
+        await image.decode();
+        ctx.save();
+        ctx.beginPath();
+        ctx.roundRect(88, 92, 210, 210, 22);
+        ctx.clip();
+        ctx.drawImage(image, 88, 92, 210, 210);
+        ctx.restore();
+      } catch (_error) {
+        ctx.fillStyle = "rgba(255,210,122,0.16)";
+        ctx.fillRect(88, 92, 210, 210);
+      }
+    }
+
+    ctx.fillStyle = "#ffd27a";
+    ctx.font = "700 34px serif";
+    ctx.fillText(BRAND_CN, 88, 382);
+    ctx.fillStyle = "#f6f2e6";
+    ctx.font = "700 54px serif";
+    ctx.fillText(String(displayTrack.title || "未命名歌曲").slice(0, 18), 88, 455);
+    ctx.fillStyle = "#f6dca6";
+    ctx.font = "500 28px sans-serif";
+    ctx.fillText(String(displayTrack.artist || "未知艺人").slice(0, 28), 92, 506);
+    ctx.fillStyle = "#8b93a7";
+    ctx.font = "500 22px sans-serif";
+    ctx.fillText([displayTrack.album, displayTrack.year || displayTrack.playlistName].filter(Boolean).join(" · ").slice(0, 42), 92, 552);
+    ctx.fillStyle = "rgba(255,255,255,0.72)";
+    ctx.font = "500 18px sans-serif";
+    ctx.fillText(`${BRAND_EN} · ${new Date().toLocaleDateString("zh-CN")}`, 92, 640);
+
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        flash("留影生成失败");
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${safeFileName(displayTrack.title || BRAND_EN)}-留影.png`;
+      link.click();
+      URL.revokeObjectURL(url);
+      flash("留影已保存为图片");
+    }, "image/png");
   }
 
   function toggleSavedTrack() {
     if (!displayTrack) return;
     const key = trackKey(displayTrack);
     const next = new Set(savedKeys);
+    const nextItems = { ...savedTrackItems };
     if (next.has(key)) {
       next.delete(key);
+      delete nextItems[key];
       flash("已移出拾遗");
     } else {
       next.add(key);
+      nextItems[key] = {
+        ...displayTrack,
+        savedAt: new Date().toISOString()
+      };
       flash("已收进拾遗");
     }
     setSavedKeys(next);
+    setSavedTrackItems(nextItems);
     localStorage.setItem("agentio.savedTracks", JSON.stringify([...next]));
+    localStorage.setItem("agentio.savedTrackItems", JSON.stringify(nextItems));
+  }
+
+  function captureRandomSong(point = {}) {
+    const source = (sphereTracks.length ? sphereTracks : [...libraryTracks, ...Object.values(savedTrackItems)])
+      .filter((track) => track && !track.artistCenter && !track.placeholder);
+    if (!source.length) {
+      flash("还没有可捕捉的歌曲");
+      return;
+    }
+    const seed = Math.floor((point.x || window.innerWidth / 2) * 17 + (point.y || window.innerHeight / 2) * 31 + Date.now());
+    const picked = source[Math.abs(seed) % source.length];
+    const id = `capture-${Date.now()}`;
+    setCaptureOrb({ id, x: point.x || window.innerWidth / 2, y: point.y || window.innerHeight / 2, title: picked.title || "捕捉星歌" });
+    flash("捕捉小球已释放");
+    window.setTimeout(() => {
+      setCaptureOrb((current) => current?.id === id ? { ...current, locked: true } : current);
+      void playTrackFromUi(picked);
+      flash(`捕捉到 ${picked.title || "一首歌"}`);
+    }, 1150);
+    window.setTimeout(() => {
+      setCaptureOrb((current) => current?.id === id ? null : current);
+    }, 2200);
   }
 
   return (
@@ -1592,7 +1750,7 @@ function App() {
           {BRAND_CN} <span className="title-en">{BRAND_EN}</span>
         </div>
         <div className="seg">
-          {["歌手", "歌单", "封面", "年代"].map((mode) => (
+          {["歌手", "歌单", "封面", "年代", "拾遗"].map((mode) => (
             <button key={mode} className={`seg-btn ${viewMode === mode ? "on" : ""}`} onClick={() => selectViewMode(mode)} type="button">
               {mode}
             </button>
@@ -1696,7 +1854,19 @@ function App() {
         selectedKey={trackKey(selectedTrack)}
         onSelect={selectSphereTrack}
         onHover={setHoveredTrack}
+        onBlankDoubleClick={captureRandomSong}
       />
+
+      {captureOrb && (
+        <div
+          className={`capture-orb ${captureOrb.locked ? "locked" : ""}`}
+          style={{ "--capture-x": `${captureOrb.x}px`, "--capture-y": `${captureOrb.y}px` }}
+          aria-hidden="true"
+        >
+          <span />
+          <em>{captureOrb.locked ? captureOrb.title : "捕捉中"}</em>
+        </div>
+      )}
 
       {jumping && jumpTrack && (
         <div className="warp-field" aria-hidden="true">
@@ -1820,7 +1990,9 @@ function App() {
             <div className="poem-share">
               <button className="copy-btn share" type="button" onClick={shareTrack}>分享</button>
               <button className="copy-btn" type="button" onClick={saveSnapshot}>留影</button>
-              <button className="copy-btn" type="button" onClick={toggleSavedTrack}>{savedKeys.has(trackKey(displayTrack)) ? "已收进拾遗" : "收进拾遗"}</button>
+              <button className={`copy-btn ${savedKeys.has(trackKey(displayTrack)) ? "saved" : ""}`} type="button" onClick={toggleSavedTrack}>
+                {savedKeys.has(trackKey(displayTrack)) ? "已收进拾遗" : "收进拾遗"}
+              </button>
             </div>
           </div>
         </section>
