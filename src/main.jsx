@@ -6,6 +6,7 @@ import "./styles.css";
 const BRAND_CN = "云韶";
 const BRAND_EN = "CaelumShao";
 const LIBRARY_CACHE_KEY = "caelumshao.libraryTracks.v1";
+const PODCAST_ENABLED_KEY = "caelumshao.podcastEnabled.v1";
 const RENDER_LIMITS = {
   low: { tracks: 650, dust: 9000 },
   high: { tracks: 1800, dust: 26000 }
@@ -956,6 +957,8 @@ function App() {
   const [globalSearching, setGlobalSearching] = useState(false);
   const [globalSearchStats, setGlobalSearchStats] = useState([]);
   const [uiHidden, setUiHidden] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [podcastEnabled, setPodcastEnabled] = useState(() => localStorage.getItem(PODCAST_ENABLED_KEY) !== "false");
   const [panelOpen, setPanelOpen] = useState(true);
   const [savedKeys, setSavedKeys] = useState(() => {
     try {
@@ -988,6 +991,7 @@ function App() {
 
   const audioRef = useRef(null);
   const podcastAudioRef = useRef(null);
+  const podcastEnabledRef = useRef(podcastEnabled);
   const queueRef = useRef([]);
   const queueIndexRef = useRef(-1);
   const playTokenRef = useRef(0);
@@ -1319,6 +1323,15 @@ function App() {
     return () => window.cancelAnimationFrame(raf);
   }, [playerSource, isPlaying]);
 
+  useEffect(() => {
+    podcastEnabledRef.current = podcastEnabled;
+    localStorage.setItem(PODCAST_ENABLED_KEY, podcastEnabled ? "true" : "false");
+    if (!podcastEnabled) {
+      stopPodcastOverlay();
+      setMessage("播客已关闭，只播放音乐");
+    }
+  }, [podcastEnabled]);
+
   function stopPodcastOverlay() {
     if (window.speechSynthesis) window.speechSynthesis.cancel();
     const podcastAudio = podcastAudioRef.current;
@@ -1331,7 +1344,7 @@ function App() {
   }
 
   async function startTtsPodcastOverlay(track, token) {
-    if (!track) return;
+    if (!track || !podcastEnabledRef.current) return;
     const musicAudio = audioRef.current;
     const podcastAudio = podcastAudioRef.current;
     if (!musicAudio || !podcastAudio) {
@@ -1413,14 +1426,17 @@ function App() {
 
     try {
       const originalUrl = track.musicUrl || track.url || await resolveOriginal();
-      const started = playSourceNow(originalUrl, `音乐已播放 ${index + 1}/${queue.length || 1}，正在后台生成播客`);
+      const playMessage = podcastEnabledRef.current
+        ? `音乐已播放 ${index + 1}/${queue.length || 1}，正在后台生成播客`
+        : `音乐已播放 ${index + 1}/${queue.length || 1}`;
+      const started = playSourceNow(originalUrl, playMessage);
       if (started) {
         queue[index] = { ...track, musicUrl: originalUrl };
         queueRef.current = [...queue];
         setTrackQueue([...queue]);
         void loadLyricsForTrack(track, token);
         window.setTimeout(() => {
-          if (token === playTokenRef.current) void startTtsPodcastOverlay({ ...track, musicUrl: originalUrl }, token);
+          if (token === playTokenRef.current && podcastEnabledRef.current) void startTtsPodcastOverlay({ ...track, musicUrl: originalUrl }, token);
         }, 1200);
       }
     } catch (error) {
@@ -1952,6 +1968,9 @@ function App() {
         <button className={`filter ${qualityMode === "high" ? "on" : ""}`} type="button" onClick={() => setQualityMode((mode) => mode === "high" ? "low" : "high")}>
           {qualityMode === "high" ? "高画质" : "低画质"}
         </button>
+        <button className={`filter settings-trigger ${settingsOpen ? "on" : ""}`} type="button" onClick={() => setSettingsOpen((value) => !value)}>
+          设置
+        </button>
         <span className="stat">{isLibraryLoading ? "同步曲库中" : `${playlistCount || 0} 歌单 · ${libraryTracks.length || 0} 首`}</span>
         <div className="login-actions">
           {isNeteaseLoggedIn ? (
@@ -1976,6 +1995,25 @@ function App() {
       )}
 
       {uiHidden && <button className="ui-restore" type="button" onClick={() => setUiHidden(false)}>显示界面 · H</button>}
+
+      {!uiHidden && settingsOpen && (
+        <section className="settings-panel" role="dialog" aria-label="播放设置">
+          <button className="panel-close" aria-label="关闭设置" type="button" onClick={() => setSettingsOpen(false)}>×</button>
+          <div className="settings-title">播放设置</div>
+          <label className="setting-row">
+            <span>
+              <strong>音乐播客</strong>
+              <small>{podcastEnabled ? "点歌后会在后台生成讲述并叠加播放" : "只播放原曲，不再叠加 AI 播客"}</small>
+            </span>
+            <input
+              type="checkbox"
+              checked={podcastEnabled}
+              onChange={(event) => setPodcastEnabled(event.target.checked)}
+              aria-label="开启或关闭音乐播客"
+            />
+          </label>
+        </section>
+      )}
 
       {!uiHidden && (
       <aside className="search">
@@ -2162,7 +2200,7 @@ function App() {
               <span className="meta-k">歌曲编号</span>
               <span className="meta-v idx full">{String(displayTrack.id || trackKey(displayTrack))}</span>
             </div>
-            <div className="poem-foot">点击歌星后播放音乐，并接入实时播客；播客不报主持人名，只讲歌曲与场景本身。</div>
+            <div className="poem-foot">点击歌星后播放音乐；是否叠加 AI 播客可在设置中随时切换。</div>
             <div className="poem-share">
               <button className="copy-btn share" type="button" onClick={shareTrack}>分享</button>
               <button className="copy-btn" type="button" onClick={saveSnapshot}>留影</button>
@@ -2188,7 +2226,7 @@ function App() {
 
       {!uiHidden && (
       <footer className="hud-bottom">
-        <span className="hint">搜索跃迁定位 · WASD/方向键移动镜头 · 拖拽旋转 · <b>点击歌星</b>播放音乐与播客</span>
+        <span className="hint">搜索跃迁定位 · WASD/方向键移动镜头 · 拖拽旋转 · <b>点击歌星</b>播放音乐</span>
         <span className="speed">{jumping ? "速度 ×1.49 · 星系跃迁中" : deepFocus ? `近距离锁定 · ${jumpTrack?.title || "目标星点"}` : `${isPlaying ? "正在播放" : message || "待命"} · ${formatTime(audioTime)}`}</span>
       </footer>
       )}
