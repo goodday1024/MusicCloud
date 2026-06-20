@@ -5,6 +5,7 @@ import "./styles.css";
 
 const BRAND_CN = "云韶";
 const BRAND_EN = "CaelumShao";
+const LIBRARY_CACHE_KEY = "caelumshao.libraryTracks.v1";
 const RENDER_LIMITS = {
   low: { tracks: 650, dust: 9000 },
   high: { tracks: 1800, dust: 26000 }
@@ -54,6 +55,68 @@ function safeFileName(value, fallback = "caelumshao") {
     .replace(/[\\/:*?"<>|#%{}[\]^~`]/g, "")
     .replace(/\s+/g, "-")
     .slice(0, 48) || fallback;
+}
+
+function readLibraryCache() {
+  try {
+    const payload = JSON.parse(localStorage.getItem(LIBRARY_CACHE_KEY) || "{}");
+    const items = Array.isArray(payload) ? payload : Array.isArray(payload.items) ? payload.items : [];
+    return {
+      items,
+      updatedAt: payload.updatedAt || ""
+    };
+  } catch (_error) {
+    return { items: [], updatedAt: "" };
+  }
+}
+
+function libraryFingerprint(items = []) {
+  return items
+    .map((track) => [
+      trackKey(track),
+      track?.title || "",
+      track?.artist || "",
+      track?.playlistId || "",
+      track?.platform || track?.sourcePlatform || ""
+    ].join("|"))
+    .join("\n");
+}
+
+function compactLibraryTrack(track = {}) {
+  return {
+    id: track.id || "",
+    songId: track.songId || track.songid || "",
+    title: track.title || "",
+    artist: track.artist || "",
+    album: track.album || "",
+    cover: track.cover || "",
+    duration: track.duration || 0,
+    publishTime: track.publishTime || "",
+    year: track.year || "",
+    platform: track.platform || track.sourcePlatform || "",
+    sourcePlatform: track.sourcePlatform || track.platform || "",
+    mediaId: track.mediaId || track.media_mid || track.raw?.strMediaMid || track.raw?.media_mid || "",
+    qqSearchKey: track.qqSearchKey || "",
+    musicUrl: track.musicUrl || track.url || "",
+    libraryKey: track.libraryKey || trackKey(track),
+    playlistId: track.playlistId || "",
+    playlistName: track.playlistName || "",
+    playlistDescription: track.playlistDescription || "",
+    playCount: track.playCount || 0
+  };
+}
+
+function writeLibraryCache(items = []) {
+  const payload = {
+    updatedAt: new Date().toISOString(),
+    items: items.map(compactLibraryTrack)
+  };
+  try {
+    localStorage.setItem(LIBRARY_CACHE_KEY, JSON.stringify(payload));
+  } catch (error) {
+    console.warn("library cache write failed:", error?.message || error);
+  }
+  return payload;
 }
 
 async function readJsonResponse(response, fallbackMessage = "接口请求失败") {
@@ -819,7 +882,8 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
 function App() {
   const [neteaseState, setNeteaseState] = useState(null);
   const [qqMusicState, setQqMusicState] = useState(null);
-  const [libraryTracks, setLibraryTracks] = useState([]);
+  const [libraryCacheMeta, setLibraryCacheMeta] = useState(() => readLibraryCache());
+  const [libraryTracks, setLibraryTracks] = useState(() => readLibraryCache().items);
   const [selectedTrack, setSelectedTrack] = useState(null);
   const [hoveredTrack, setHoveredTrack] = useState(null);
   const [trackQueue, setTrackQueue] = useState([]);
@@ -993,31 +1057,49 @@ function App() {
     const response = await fetch("/api/netease/library/tracks");
     const data = await readJsonResponse(response);
     if (!response.ok) throw new Error(data.error || "网易云曲库暂时没有载入");
-    return data.items || [];
+    return { items: data.items || [], warning: data.warning || "" };
   }
 
   async function loadQqMusicLibrary() {
     const response = await fetch("/api/qqmusic/library/tracks");
     const data = await readJsonResponse(response);
     if (!response.ok) throw new Error(data.error || "QQ 音乐曲库暂时没有载入");
-    return data.items || [];
+    return { items: data.items || [], warning: data.warning || "" };
   }
 
-  async function loadAllLibraries() {
+  async function loadAllLibraries({ background = false } = {}) {
     const token = libraryLoadRef.current + 1;
     libraryLoadRef.current = token;
     setIsLibraryLoading(true);
-    const [neteaseItems, qqItems] = await Promise.all([
-      loadNeteaseLibrary().catch(() => []),
-      loadQqMusicLibrary().catch(() => [])
+    const [neteaseResult, qqResult] = await Promise.all([
+      loadNeteaseLibrary().catch((error) => ({ items: [], warning: error.message || "网易云曲库暂时没有载入" })),
+      loadQqMusicLibrary().catch((error) => ({ items: [], warning: error.message || "QQ 音乐曲库暂时没有载入" }))
     ]);
     if (token !== libraryLoadRef.current) return [];
-    const merged = [...neteaseItems, ...qqItems];
-    setLibraryTracks(merged);
-    if (!merged.length) setMessage("还没有载入曲库，请先登录网易云或 QQ 音乐");
-    else setMessage("");
+    const merged = [...neteaseResult.items, ...qqResult.items];
+    const warnings = [neteaseResult.warning, qqResult.warning].filter(Boolean);
+    if (merged.length) {
+      const oldFingerprint = libraryFingerprint(libraryTracks);
+      const nextFingerprint = libraryFingerprint(merged);
+      if (oldFingerprint !== nextFingerprint) {
+        setLibraryTracks(merged);
+        setLibraryCacheMeta(writeLibraryCache(merged));
+      }
+      setMessage(background ? "" : `曲库已同步 ${merged.length} 首`);
+    } else if (!libraryTracks.length) {
+      const cached = readLibraryCache();
+      if (cached.items.length) {
+        setLibraryTracks(cached.items);
+        setLibraryCacheMeta(cached);
+        setMessage("正在使用上次缓存的曲库，登录可能已过期");
+      } else {
+        setMessage(warnings[0] || "还没有载入曲库，请先登录网易云或 QQ 音乐");
+      }
+    } else if (warnings.length) {
+      setMessage("正在使用缓存曲库，登录可能已过期");
+    }
     setIsLibraryLoading(false);
-    return merged;
+    return merged.length ? merged : libraryTracks;
   }
 
   useEffect(() => {
@@ -1039,10 +1121,19 @@ function App() {
   }, []);
 
   useEffect(() => {
-    loadAllLibraries().catch(() => {
-      setLibraryTracks([]);
+    const cached = readLibraryCache();
+    if (cached.items.length && !libraryTracks.length) {
+      setLibraryTracks(cached.items);
+      setLibraryCacheMeta(cached);
+      setMessage(`已载入缓存曲库 ${cached.items.length} 首，正在后台同步`);
+    }
+    loadAllLibraries({ background: Boolean(cached.items.length || libraryTracks.length) }).catch((error) => {
       setIsLibraryLoading(false);
-      setMessage("曲库暂时没有载入");
+      if (!libraryTracks.length && cached.items.length) {
+        setLibraryTracks(cached.items);
+        setLibraryCacheMeta(cached);
+      }
+      setMessage(error?.message || "正在使用缓存曲库");
     });
   }, [isNeteaseLoggedIn, isQqMusicLoggedIn]);
 
