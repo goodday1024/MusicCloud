@@ -8,12 +8,12 @@ const BRAND_EN = "CaelumShao";
 const LIBRARY_CACHE_KEY = "caelumshao.libraryTracks.v1";
 const PODCAST_ENABLED_KEY = "caelumshao.podcastEnabled.v1";
 const RENDER_LIMITS = {
-  low: { tracks: 650, dust: 9000 },
-  high: { tracks: 1800, dust: 26000 }
+  low: { tracks: 520, dust: 7600, mist: 900 },
+  high: { tracks: 2400, dust: 52000, mist: 7800 }
 };
 const GLOBAL_RENDER_LIMITS = {
-  low: { tracks: 1200, dust: 16000 },
-  high: { tracks: 2600, dust: 38000 }
+  low: { tracks: 900, dust: 12000, mist: 1300 },
+  high: { tracks: 3800, dust: 76000, mist: 9800 }
 };
 
 function trackKey(track) {
@@ -309,6 +309,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
   const onSelectRef = useRef(onSelect);
   const onHoverRef = useRef(onHover);
   const energyRef = useRef(energy);
+  const playingRef = useRef(playing);
   const jumpingRef = useRef(jumping);
   const deepFocusRef = useRef(deepFocus);
   const globalModeRef = useRef(globalMode);
@@ -341,6 +342,10 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
   useEffect(() => {
     energyRef.current = energy;
   }, [energy]);
+
+  useEffect(() => {
+    playingRef.current = playing;
+  }, [playing]);
 
   useEffect(() => {
     jumpingRef.current = jumping;
@@ -693,8 +698,13 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
         return center.clone().add(orbit);
       });
 
-      const dustLimit = RENDER_LIMITS[qualityModeRef.current]?.dust || RENDER_LIMITS.low.dust;
-      const dustCount = Math.max(18000, Math.min(dustLimit, Math.max(list.length * 42, 18000)));
+      const renderLimits = globalModeRef.current
+        ? (GLOBAL_RENDER_LIMITS[qualityModeRef.current] || GLOBAL_RENDER_LIMITS.low)
+        : (RENDER_LIMITS[qualityModeRef.current] || RENDER_LIMITS.low);
+      const highQuality = qualityModeRef.current === "high";
+      const dustBase = highQuality ? 30000 : 6500;
+      const dustPerTrack = highQuality ? 72 : 22;
+      const dustCount = Math.max(dustBase, Math.min(renderLimits.dust, Math.max(list.length * dustPerTrack, dustBase)));
       const dustPositions = new Float32Array(dustCount * 3);
       const dustColors = new Float32Array(dustCount * 3);
       for (let i = 0; i < dustCount; i += 1) {
@@ -705,7 +715,8 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
         dustPositions[i * 3 + 2] = point.z;
         const c = nebulaLayerColor(point);
         const band = point.length() < 1.05 ? 0.58 : point.length() < 2.18 ? 1.28 : 1.45;
-        const warmth = band + core * 0.08 + seededNoise(i + 88) * 0.12;
+        const qualityTint = highQuality ? 0.18 * Math.sin(i * 0.013 + point.x * 2.7) : 0;
+        const warmth = band + core * (highQuality ? 0.16 : 0.08) + seededNoise(i + 88) * (highQuality ? 0.2 : 0.12) + qualityTint;
         dustColors[i * 3] = c.r * warmth;
         dustColors[i * 3 + 1] = c.g * warmth;
         dustColors[i * 3 + 2] = c.b * warmth;
@@ -716,20 +727,27 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       dust = new THREE.Points(dustGeometry, dustMaterial);
       group.add(dust);
 
-      const mistCount = Math.max(1400, Math.min(2800, Math.floor(dustCount * 0.14)));
+      const mistBase = highQuality ? 3600 : 700;
+      const mistRatio = highQuality ? 0.17 : 0.075;
+      const mistCount = Math.max(mistBase, Math.min(renderLimits.mist, Math.floor(dustCount * mistRatio)));
       const mistPositions = new Float32Array(mistCount * 3);
       const mistColors = new Float32Array(mistCount * 3);
       for (let i = 0; i < mistCount; i += 1) {
         const point = galaxyPoint(i + 77, mistCount, 2500);
-        const scatter = 0.85 + seededNoise(i + 991) * 1.75;
+        const scatter = highQuality ? 0.68 + seededNoise(i + 991) * 2.2 : 0.95 + seededNoise(i + 991) * 1.45;
         mistPositions[i * 3] = point.x * scatter;
-        mistPositions[i * 3 + 1] = point.y * 0.92 + (seededNoise(i + 321) - 0.5) * 0.26;
+        mistPositions[i * 3 + 1] = point.y * (highQuality ? 1.05 : 0.92) + (seededNoise(i + 321) - 0.5) * (highQuality ? 0.38 : 0.2);
         mistPositions[i * 3 + 2] = point.z * scatter;
         const core = Math.max(0.12, 1 - Math.min(1, point.length() / 3.9));
-        mistColor.setHSL(0.11 + seededNoise(i + 43) * 0.05, 0.28, 0.7);
-        mistColors[i * 3] = mistColor.r * (0.24 + core * 0.2);
-        mistColors[i * 3 + 1] = mistColor.g * (0.24 + core * 0.2);
-        mistColors[i * 3 + 2] = mistColor.b * (0.24 + core * 0.2);
+        if (highQuality) {
+          mistColor.setHSL((seededNoise(i + 43) * 0.82 + 0.02) % 1, 0.42, 0.72);
+        } else {
+          mistColor.setHSL(0.11 + seededNoise(i + 43) * 0.05, 0.28, 0.7);
+        }
+        const mistLift = highQuality ? 0.22 + core * 0.34 : 0.24 + core * 0.2;
+        mistColors[i * 3] = mistColor.r * mistLift;
+        mistColors[i * 3 + 1] = mistColor.g * mistLift;
+        mistColors[i * 3 + 2] = mistColor.b * mistLift;
       }
       const mistGeometry = new THREE.BufferGeometry();
       mistGeometry.setAttribute("position", new THREE.BufferAttribute(mistPositions, 3));
@@ -950,29 +968,35 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       focusHaloMaterial.opacity = closeFocus ? 0.78 : 0.62;
       focusCoreMaterial.opacity = closeFocus ? 0.98 : 0.86;
       const now = performance.now() * 0.001;
+      const highQuality = qualityModeRef.current === "high";
       const farAmount = closeFocus
         ? 0
         : Math.max(0, Math.min(1, ((camera.position.z - 4.9) / 6.2) + ((0.92 - wheelZoom) * 0.92)));
       const fadeOut = closeFocus ? 0 : Math.max(0, Math.min(1, (camera.position.z - 7.3) / 4.8));
-      const dustTwinkle = farAmount * (0.055 * Math.sin(now * 1.7) + 0.032 * Math.sin(now * 3.9 + 1.8));
-      const trackTwinkle = farAmount * (0.07 * Math.sin(now * 2.35 + 0.7) + 0.026 * Math.sin(now * 5.1));
+      const dustTwinkle = farAmount * ((highQuality ? 0.035 : 0.055) * Math.sin(now * 1.7) + (highQuality ? 0.018 : 0.032) * Math.sin(now * 3.9 + 1.8));
+      const trackTwinkle = farAmount * ((highQuality ? 0.045 : 0.07) * Math.sin(now * 2.35 + 0.7) + (highQuality ? 0.016 : 0.026) * Math.sin(now * 5.1));
       if (mistCloud) {
-        mistGroup.rotation.y += 0.00003;
-        mistGroup.rotation.x += 0.00001;
-        mistCloud.position.x = Math.sin(now * 0.08) * 0.08;
-        mistCloud.position.y = Math.cos(now * 0.06) * 0.05;
-        mistCloud.position.z = Math.sin(now * 0.05) * 0.1;
-        mistMaterial.opacity = closeFocus ? 0.035 : (0.06 + farAmount * 0.035 + Math.sin(now * 0.45) * 0.008) * (1 - fadeOut * 0.68);
-        mistMaterial.size = closeFocus ? 0.18 : (0.24 + farAmount * 0.06) * (1 - fadeOut * 0.16);
+        mistGroup.rotation.y += highQuality ? 0.000045 : 0.00003;
+        mistGroup.rotation.x += highQuality ? 0.000018 : 0.00001;
+        mistCloud.position.x = Math.sin(now * (highQuality ? 0.055 : 0.08)) * (highQuality ? 0.14 : 0.08);
+        mistCloud.position.y = Math.cos(now * (highQuality ? 0.045 : 0.06)) * (highQuality ? 0.09 : 0.05);
+        mistCloud.position.z = Math.sin(now * (highQuality ? 0.04 : 0.05)) * (highQuality ? 0.16 : 0.1);
+        mistMaterial.opacity = closeFocus
+          ? (highQuality ? 0.05 : 0.035)
+          : ((highQuality ? 0.095 : 0.06) + farAmount * (highQuality ? 0.055 : 0.035) + Math.sin(now * 0.45) * (highQuality ? 0.012 : 0.008)) * (1 - fadeOut * 0.68);
+        mistMaterial.size = closeFocus
+          ? (highQuality ? 0.26 : 0.18)
+          : ((highQuality ? 0.38 : 0.24) + farAmount * (highQuality ? 0.12 : 0.06)) * (1 - fadeOut * 0.16);
       }
       const distanceScale = Math.max(0.88, Math.min(1.12, 7.4 / Math.max(2.2, camera.position.z)));
-      dustMaterial.size = (closeFocus ? 0.009 : 0.014) * distanceScale * (1 + farAmount * 0.02 + dustTwinkle * 0.25) * (1 - fadeOut * 0.2);
-      dustMaterial.opacity = closeFocus ? 0.82 : 0.82 * (1 - fadeOut * 0.72);
-      trackMaterial.size = (closeFocus ? 0.078 : 0.09) * distanceScale * (1 + farAmount * 0.02 + trackTwinkle * 0.2) * (1 - fadeOut * 0.14);
-      trackMaterial.opacity = closeFocus ? 0.9 : 0.88 * (1 - fadeOut * 0.68);
+      dustMaterial.size = (closeFocus ? 0.009 : highQuality ? 0.012 : 0.014) * distanceScale * (1 + farAmount * 0.02 + dustTwinkle * 0.25) * (1 - fadeOut * 0.2);
+      dustMaterial.opacity = closeFocus ? 0.82 : (highQuality ? 0.72 : 0.82) * (1 - fadeOut * 0.72);
+      trackMaterial.size = (closeFocus ? 0.078 : highQuality ? 0.082 : 0.09) * distanceScale * (1 + farAmount * 0.02 + trackTwinkle * 0.2) * (1 - fadeOut * 0.14);
+      trackMaterial.opacity = closeFocus ? 0.9 : (highQuality ? 0.8 : 0.88) * (1 - fadeOut * 0.68);
       if (!dragging) {
-        group.rotation.y += (closeFocus ? 0.00002 : hasFocus ? 0.00008 : 0.00065) + energyRef.current * (closeFocus ? 0.00004 : hasFocus ? 0.00035 : 0.0014);
-        group.rotation.x += closeFocus ? 0.00001 : 0;
+        const playingSpin = playingRef.current ? (closeFocus ? 0.00018 : hasFocus ? 0.00042 : 0.00115) : 0;
+        group.rotation.y += (closeFocus ? 0.00002 : hasFocus ? 0.00008 : 0.00065) + playingSpin + energyRef.current * (closeFocus ? 0.00005 : hasFocus ? 0.00042 : 0.0016);
+        group.rotation.x += closeFocus ? 0.00001 : playingRef.current ? 0.000025 : 0;
       }
       renderer.render(scene, camera);
       raf = window.requestAnimationFrame(animate);
@@ -1055,7 +1079,7 @@ function App() {
   const [searchMode, setSearchMode] = useState("歌曲");
   const [query, setQuery] = useState("");
   const [globalSearchEnabled, setGlobalSearchEnabled] = useState(false);
-  const [qualityMode, setQualityMode] = useState("low");
+  const [qualityMode, setQualityMode] = useState("high");
   const [globalTracks, setGlobalTracks] = useState([]);
   const [globalSearching, setGlobalSearching] = useState(false);
   const [globalSearchStats, setGlobalSearchStats] = useState([]);
