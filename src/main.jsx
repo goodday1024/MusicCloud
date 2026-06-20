@@ -11,6 +11,10 @@ const RENDER_LIMITS = {
   low: { tracks: 650, dust: 9000 },
   high: { tracks: 1800, dust: 26000 }
 };
+const GLOBAL_RENDER_LIMITS = {
+  low: { tracks: 1200, dust: 16000 },
+  high: { tracks: 2600, dust: 38000 }
+};
 
 function trackKey(track) {
   if (!track) return "";
@@ -275,13 +279,24 @@ function nebulaLayerColor(point) {
   const radius = point.length();
   const color = new THREE.Color();
   if (radius < 1.05) {
-    color.set(0xd6d3c7);
+    const bands = [0xf6efe6, 0xf2d9c6, 0xe8f0ff, 0xd9f7ec];
+    color.set(bands[Math.floor(seededNoise(radius * 99 + 7) * bands.length) % bands.length]);
   } else if (radius < 2.18) {
     const mix = Math.min(1, Math.max(0, (radius - 1.05) / 1.13));
-    color.set(0x2fcf85).lerp(new THREE.Color(0x009b62), Math.max(0.35, mix));
+    const midA = new THREE.Color(0x1bcaa8);
+    const midB = new THREE.Color(0x3f8cff);
+    const midC = new THREE.Color(0xffc24d);
+    const midD = new THREE.Color(0x7f68ff);
+    const pick = mix < 0.25 ? midA : mix < 0.5 ? midB : mix < 0.75 ? midC : midD;
+    color.copy(pick).lerp(new THREE.Color(0x0f5f7a), Math.max(0.14, mix * 0.42));
   } else {
     const mix = Math.min(1, Math.max(0, (radius - 2.18) / 1.35));
-    color.set(0xc94a32).lerp(new THREE.Color(0xff5a36), Math.max(0.28, mix));
+    const outerA = new THREE.Color(0xff6b6b);
+    const outerB = new THREE.Color(0xff9f43);
+    const outerC = new THREE.Color(0xffd166);
+    const outerD = new THREE.Color(0xf78fb3);
+    const pick = mix < 0.25 ? outerA : mix < 0.5 ? outerB : mix < 0.75 ? outerC : outerD;
+    color.copy(pick).lerp(new THREE.Color(0x7a2e5d), Math.max(0.08, mix * 0.34));
   }
   return color;
 }
@@ -356,7 +371,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(46, 1, 0.1, 100);
-    camera.position.set(0, 0, 6.4);
+    camera.position.set(0, 0, 6);
 
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -371,9 +386,16 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     group.rotation.z = -0.08;
     scene.add(group);
 
+    const mistGroup = new THREE.Group();
+    mistGroup.rotation.x = -0.1;
+    mistGroup.rotation.z = 0.06;
+    group.add(mistGroup);
+
     let trackCloud = null;
     let dust = null;
     let beams = null;
+    let mistCloud = null;
+    let mistDrift = null;
     let positions = [];
     let renderList = [];
     let activeId = -1;
@@ -493,11 +515,11 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       canvas.width = 64;
       canvas.height = 64;
       const ctx = canvas.getContext("2d");
-      const gradient = ctx.createRadialGradient(32, 32, 1, 32, 32, 30);
+      const gradient = ctx.createRadialGradient(32, 32, 1, 32, 32, 20);
       gradient.addColorStop(0, "rgba(255,255,255,1)");
-      gradient.addColorStop(0.24, "rgba(255,255,255,0.98)");
-      gradient.addColorStop(0.5, "rgba(255,235,168,0.58)");
-      gradient.addColorStop(0.78, "rgba(255,205,104,0.18)");
+      gradient.addColorStop(0.18, "rgba(255,255,255,0.98)");
+      gradient.addColorStop(0.38, "rgba(255,235,168,0.42)");
+      gradient.addColorStop(0.62, "rgba(255,205,104,0.1)");
       gradient.addColorStop(1, "rgba(255,255,255,0)");
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, 64, 64);
@@ -505,22 +527,48 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       texture.colorSpace = THREE.SRGBColorSpace;
       return texture;
     };
+    const makeMistTexture = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 128;
+      canvas.height = 128;
+      const ctx = canvas.getContext("2d");
+      const gradient = ctx.createRadialGradient(64, 64, 8, 64, 64, 62);
+      gradient.addColorStop(0, "rgba(255, 248, 231, 0.28)");
+      gradient.addColorStop(0.28, "rgba(255, 225, 171, 0.12)");
+      gradient.addColorStop(0.64, "rgba(255, 210, 122, 0.04)");
+      gradient.addColorStop(1, "rgba(255, 210, 122, 0)");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 128, 128);
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      return texture;
+    };
     const pointTexture = makePointTexture();
+    const mistTexture = makeMistTexture();
+    const mistMaterial = new THREE.PointsMaterial({
+      size: 0.34,
+      map: mistTexture,
+      transparent: true,
+      opacity: 0.08,
+      color: 0xf5e8c8,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
     const dustMaterial = new THREE.PointsMaterial({
-      size: 0.013,
+      size: 0.015,
       map: pointTexture,
       transparent: true,
-      opacity: 0.98,
+      opacity: 0.9,
       vertexColors: true,
       blending: THREE.AdditiveBlending,
       depthWrite: false
     });
     const trackMaterial = new THREE.PointsMaterial({
-      size: 0.066,
+      size: 0.078,
       map: pointTexture,
       sizeAttenuation: true,
       transparent: true,
-      opacity: 1,
+      opacity: 0.92,
       vertexColors: true,
       blending: THREE.AdditiveBlending,
       depthWrite: false
@@ -536,26 +584,26 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     const goldColor = new THREE.Color(0xffd36f);
     const coreStarColor = new THREE.Color(0xf1efe3);
     const hoverStarColor = new THREE.Color(0xfff2bd);
+    const mistColor = new THREE.Color(0xf5e8c8);
     const raycaster = new THREE.Raycaster();
     raycaster.params.Points.threshold = 0.075;
     const pointer = new THREE.Vector2();
     const activePointers = new Map();
     const pressedKeys = new Set();
     const cameraRight = new THREE.Vector3();
-    const cameraUp = new THREE.Vector3();
-    const centerDirection = new THREE.Vector3();
+    const cameraForward = new THREE.Vector3();
     const panDelta = new THREE.Vector3();
     let dragging = false;
     let lastCenter = null;
     let lastPointerDown = { x: 0, y: 0, time: 0 };
-    let wheelZoom = 1;
-    let wheelZoomTarget = 1;
+    let wheelZoom = 0.42;
+    let wheelZoomTarget = 0.42;
     let raf = 0;
     const zoomBounds = () => {
       const closeFocus = jumpingRef.current || deepFocusRef.current;
       return {
-        min: closeFocus ? 0.18 : 0.42,
-        max: closeFocus ? 2.85 : 3.1
+        min: closeFocus ? 0.16 : 0.32,
+        max: closeFocus ? 4.2 : 7.8
       };
     };
 
@@ -570,7 +618,13 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
 
     const updateInstances = () => {
       const sourceTracks = tracksRef.current.length
-        ? pickRenderTracks(tracksRef.current, selectedKeyRef.current, RENDER_LIMITS[qualityModeRef.current]?.tracks || RENDER_LIMITS.low.tracks)
+        ? pickRenderTracks(
+            tracksRef.current,
+            selectedKeyRef.current,
+            globalModeRef.current
+              ? (GLOBAL_RENDER_LIMITS[qualityModeRef.current]?.tracks || GLOBAL_RENDER_LIMITS.low.tracks)
+              : (RENDER_LIMITS[qualityModeRef.current]?.tracks || RENDER_LIMITS.low.tracks)
+          )
         : Array.from({ length: 220 }, (_, index) => ({
             title: "等待曲库",
             artist: BRAND_CN,
@@ -591,6 +645,10 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       if (beams) {
         group.remove(beams);
         beams.geometry.dispose();
+      }
+      if (mistCloud) {
+        mistGroup.remove(mistCloud);
+        mistCloud.geometry.dispose();
       }
 
       const artistCenters = new Map();
@@ -646,7 +704,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
         dustPositions[i * 3 + 1] = point.y + (seededNoise(i + 55) - 0.5) * 0.08;
         dustPositions[i * 3 + 2] = point.z;
         const c = nebulaLayerColor(point);
-        const band = point.length() < 1.05 ? 0.72 : point.length() < 2.18 ? 1.85 : 2.15;
+        const band = point.length() < 1.05 ? 0.58 : point.length() < 2.18 ? 1.28 : 1.45;
         const warmth = band + core * 0.08 + seededNoise(i + 88) * 0.12;
         dustColors[i * 3] = c.r * warmth;
         dustColors[i * 3 + 1] = c.g * warmth;
@@ -657,6 +715,28 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       dustGeometry.setAttribute("color", new THREE.BufferAttribute(dustColors, 3));
       dust = new THREE.Points(dustGeometry, dustMaterial);
       group.add(dust);
+
+      const mistCount = Math.max(1400, Math.min(2800, Math.floor(dustCount * 0.14)));
+      const mistPositions = new Float32Array(mistCount * 3);
+      const mistColors = new Float32Array(mistCount * 3);
+      for (let i = 0; i < mistCount; i += 1) {
+        const point = galaxyPoint(i + 77, mistCount, 2500);
+        const scatter = 0.85 + seededNoise(i + 991) * 1.75;
+        mistPositions[i * 3] = point.x * scatter;
+        mistPositions[i * 3 + 1] = point.y * 0.92 + (seededNoise(i + 321) - 0.5) * 0.26;
+        mistPositions[i * 3 + 2] = point.z * scatter;
+        const core = Math.max(0.12, 1 - Math.min(1, point.length() / 3.9));
+        mistColor.setHSL(0.11 + seededNoise(i + 43) * 0.05, 0.28, 0.7);
+        mistColors[i * 3] = mistColor.r * (0.24 + core * 0.2);
+        mistColors[i * 3 + 1] = mistColor.g * (0.24 + core * 0.2);
+        mistColors[i * 3 + 2] = mistColor.b * (0.24 + core * 0.2);
+      }
+      const mistGeometry = new THREE.BufferGeometry();
+      mistGeometry.setAttribute("position", new THREE.BufferAttribute(mistPositions, 3));
+      mistGeometry.setAttribute("color", new THREE.BufferAttribute(mistColors, 3));
+      mistCloud = new THREE.Points(mistGeometry, mistMaterial);
+      mistGroup.add(mistCloud);
+      mistDrift = new Float32Array(mistCount * 3);
 
       activeId = list.findIndex((track) => trackKey(track) === selectedKeyRef.current);
       hasFocus = activeId >= 0 && positions[activeId];
@@ -692,7 +772,17 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
         trackPositions[index * 3 + 1] = lifted.y;
         trackPositions[index * 3 + 2] = lifted.z;
         color.copy(isSearchGold ? goldColor : track.artistCenter || isActive ? coreStarColor : isHover ? hoverStarColor : nebulaLayerColor(lifted));
-        const boost = isSearchGold ? (track.artistCenter ? 4.25 : 2.9) : track.artistCenter ? 2.6 : isActive ? 2.15 : isHover ? 1.75 : globalModeRef.current ? 0.62 : 1.15;
+        const boost = isSearchGold
+          ? (track.artistCenter ? 3.85 : 2.55)
+          : track.artistCenter
+            ? 2.35
+            : isActive
+              ? 1.95
+              : isHover
+                ? 1.62
+                : globalModeRef.current
+                  ? 0.78
+                  : 1.02;
         trackColors[index * 3] = color.r * boost;
         trackColors[index * 3 + 1] = color.g * boost;
         trackColors[index * 3 + 2] = color.b * boost;
@@ -832,17 +922,17 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       if (panX || depth) {
         camera.updateMatrixWorld();
         cameraRight.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
-        centerDirection.set(-camera.position.x, -camera.position.y, -camera.position.z).normalize();
-        panDelta.copy(cameraRight).multiplyScalar(panX * panSpeed).addScaledVector(centerDirection, depth * depthSpeed);
+        camera.getWorldDirection(cameraForward).normalize();
+        panDelta.copy(cameraRight).multiplyScalar(panX * panSpeed).addScaledVector(cameraForward, depth * depthSpeed);
         camera.position.add(panDelta);
-        camera.position.x = Math.max(-3.2, Math.min(3.2, camera.position.x));
-        camera.position.y = Math.max(-2.2, Math.min(2.2, camera.position.y));
-        camera.position.z = Math.max(2.2, Math.min(10.5, camera.position.z));
+        camera.position.x = Math.max(-5.4, Math.min(5.4, camera.position.x));
+        camera.position.y = Math.max(-3.8, Math.min(3.8, camera.position.y));
+        camera.position.z = Math.max(1.5, Math.min(18.5, camera.position.z));
       }
       const bounds = zoomBounds();
       wheelZoomTarget = Math.max(bounds.min, Math.min(bounds.max, wheelZoomTarget));
       const jumpBoost = jumpingRef.current ? 0.32 : deepFocusRef.current ? 0.18 : 0;
-      const focusScale = hasFocus ? (closeFocus ? 3.75 : 1.52) : 1;
+      const focusScale = hasFocus ? (closeFocus ? 4.1 : 1.68) : 1;
       wheelZoom += (wheelZoomTarget - wheelZoom) * 0.12;
       const pulse = (focusScale + jumpBoost + Math.min(0.06, energyRef.current * 0.06)) * wheelZoom;
       group.scale.lerp(new THREE.Vector3(pulse, pulse, pulse), closeFocus ? 0.115 : 0.075);
@@ -853,7 +943,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       } else if (!dragging) {
         group.position.lerp(new THREE.Vector3(0, 0, 0), 0.035);
       }
-      focusPoints.scale.setScalar(closeFocus ? 3.2 : 1.65);
+      focusPoints.scale.setScalar(closeFocus ? 3.55 : 1.85);
       focusHalo.scale.setScalar(closeFocus ? 0.38 : 0.28);
       focusCore.scale.setScalar(closeFocus ? 0.22 : 0.11);
       focusMaterial.opacity = closeFocus ? 0.98 : 0.78;
@@ -862,13 +952,24 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       const now = performance.now() * 0.001;
       const farAmount = closeFocus
         ? 0
-        : Math.max(0, Math.min(1, ((camera.position.z - 5.4) / 4.2) + ((0.92 - wheelZoom) * 1.15)));
+        : Math.max(0, Math.min(1, ((camera.position.z - 4.9) / 6.2) + ((0.92 - wheelZoom) * 0.92)));
+      const fadeOut = closeFocus ? 0 : Math.max(0, Math.min(1, (camera.position.z - 7.3) / 4.8));
       const dustTwinkle = farAmount * (0.055 * Math.sin(now * 1.7) + 0.032 * Math.sin(now * 3.9 + 1.8));
       const trackTwinkle = farAmount * (0.07 * Math.sin(now * 2.35 + 0.7) + 0.026 * Math.sin(now * 5.1));
-      dustMaterial.size = (closeFocus ? 0.008 : 0.013) * (1 + farAmount * 0.16 + dustTwinkle);
-      dustMaterial.opacity = closeFocus ? 0.9 : Math.max(0.82, Math.min(1, 0.96 + dustTwinkle));
-      trackMaterial.size = (closeFocus ? 0.058 : 0.066) * (1 + farAmount * 0.12 + trackTwinkle);
-      trackMaterial.opacity = closeFocus ? 0.96 : Math.max(0.86, Math.min(1, 0.98 + trackTwinkle));
+      if (mistCloud) {
+        mistGroup.rotation.y += 0.00003;
+        mistGroup.rotation.x += 0.00001;
+        mistCloud.position.x = Math.sin(now * 0.08) * 0.08;
+        mistCloud.position.y = Math.cos(now * 0.06) * 0.05;
+        mistCloud.position.z = Math.sin(now * 0.05) * 0.1;
+        mistMaterial.opacity = closeFocus ? 0.035 : (0.06 + farAmount * 0.035 + Math.sin(now * 0.45) * 0.008) * (1 - fadeOut * 0.68);
+        mistMaterial.size = closeFocus ? 0.18 : (0.24 + farAmount * 0.06) * (1 - fadeOut * 0.16);
+      }
+      const distanceScale = Math.max(0.88, Math.min(1.12, 7.4 / Math.max(2.2, camera.position.z)));
+      dustMaterial.size = (closeFocus ? 0.009 : 0.014) * distanceScale * (1 + farAmount * 0.02 + dustTwinkle * 0.25) * (1 - fadeOut * 0.2);
+      dustMaterial.opacity = closeFocus ? 0.82 : 0.82 * (1 - fadeOut * 0.72);
+      trackMaterial.size = (closeFocus ? 0.078 : 0.09) * distanceScale * (1 + farAmount * 0.02 + trackTwinkle * 0.2) * (1 - fadeOut * 0.14);
+      trackMaterial.opacity = closeFocus ? 0.9 : 0.88 * (1 - fadeOut * 0.68);
       if (!dragging) {
         group.rotation.y += (closeFocus ? 0.00002 : hasFocus ? 0.00008 : 0.00065) + energyRef.current * (closeFocus ? 0.00004 : hasFocus ? 0.00035 : 0.0014);
         group.rotation.x += closeFocus ? 0.00001 : 0;
@@ -909,6 +1010,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       dustMaterial.dispose();
       trackMaterial.dispose();
       beamMaterial.dispose();
+      mistMaterial.dispose();
       focusGeometry.dispose();
       focusMaterial.dispose();
       focusHaloMaterial.dispose();
@@ -916,6 +1018,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       focusCoreMaterial.dispose();
       focusCoreTexture.dispose();
       pointTexture.dispose();
+      mistTexture.dispose();
       renderer.dispose();
       renderer.domElement.remove();
     };

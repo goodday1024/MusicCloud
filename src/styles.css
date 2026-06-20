@@ -43,9 +43,12 @@ button {
   inset: 0;
   overflow: hidden;
   background:
-    radial-gradient(circle at 52% 54%, rgba(255, 210, 122, 0.055), transparent 22%),
-    radial-gradient(circle at 35% 45%, rgba(214, 48, 145, 0.052), transparent 25%),
-    radial-gradient(circle at 64% 58%, rgba(35, 211, 137, 0.05), transparent 25%),
+    radial-gradient(circle at 52% 54%, rgba(255, 241, 214, 0.055), transparent 22%),
+    radial-gradient(circle at 28% 40%, rgba(255, 109, 109, 0.05), transparent 22%),
+    radial-gradient(circle at 40% 60%, rgba(255, 159, 67, 0.05), transparent 22%),
+    radial-gradient(circle at 60% 42%, rgba(70, 137, 255, 0.052), transparent 24%),
+    radial-gradient(circle at 72% 58%, rgba(31, 213, 166, 0.05), transparent 24%),
+    radial-gradient(circle at 82% 36%, rgba(182, 124, 255, 0.046), transparent 20%),
     var(--ink);
 }
 
@@ -57,10 +60,13 @@ button {
   opacity: 0.16;
   background-image:
     radial-gradient(circle, rgba(255, 255, 255, 0.66) 0 1px, transparent 1.45px),
-    radial-gradient(circle, rgba(255, 210, 122, 0.42) 0 1px, transparent 1.45px),
-    radial-gradient(circle, rgba(210, 72, 145, 0.35) 0 1px, transparent 1.45px);
-  background-position: 18px 12px, 62px 48px, 104px 18px;
-  background-size: 140px 140px, 212px 212px, 286px 286px;
+    radial-gradient(circle, rgba(255, 109, 109, 0.38) 0 1px, transparent 1.45px),
+    radial-gradient(circle, rgba(70, 137, 255, 0.36) 0 1px, transparent 1.45px),
+    radial-gradient(circle, rgba(31, 213, 166, 0.34) 0 1px, transparent 1.45px),
+    radial-gradient(circle, rgba(255, 159, 67, 0.34) 0 1px, transparent 1.45px),
+    radial-gradient(circle, rgba(182, 124, 255, 0.32) 0 1px, transparent 1.45px);
+  background-position: 18px 12px, 62px 48px, 104px 18px, 140px 54px, 24px 98px, 192px 86px;
+  background-size: 140px 140px, 212px 212px, 286px 286px, 248px 248px, 304px 304px, 352px 352px;
   animation: starDrift 54s linear infinite;
 }
 
@@ -70,11 +76,11 @@ button {
   z-index: 1;
   pointer-events: none;
   background:
-    radial-gradient(ellipse at 52% 55%, rgba(255, 255, 255, 0.11), transparent 13%),
-    conic-gradient(from 220deg at 52% 54%, rgba(255, 210, 122, 0.095), rgba(35, 211, 137, 0.085), rgba(210, 72, 145, 0.08), rgba(255, 210, 122, 0.08)),
-    radial-gradient(ellipse at center, rgba(255, 210, 122, 0.06), transparent 46%);
-  filter: blur(54px);
-  animation: nebula 10s ease-in-out infinite alternate;
+    radial-gradient(ellipse at 52% 55%, rgba(255, 248, 230, 0.12), transparent 14%),
+    conic-gradient(from 220deg at 52% 54%, rgba(255, 109, 109, 0.1), rgba(255, 159, 67, 0.1), rgba(70, 137, 255, 0.1), rgba(31, 213, 166, 0.1), rgba(182, 124, 255, 0.1), rgba(255, 109, 109, 0.1)),
+    radial-gradient(ellipse at center, rgba(255, 210, 122, 0.06), transparent 48%);
+  filter: blur(56px);
+  animation: nebulaDrift 24s ease-in-out infinite alternate;
 }
 
 canvas {
@@ -1173,6 +1179,18 @@ button.copy-btn {
   to {
     transform: scale(1.08) rotate(2deg);
     opacity: 0.84;
+  }
+}
+
+@keyframes nebulaDrift {
+  0% {
+    transform: translate3d(-1.2%, 0.6%, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(0.8%, -0.4%, 0) scale(1.03);
+  }
+  100% {
+    transform: translate3d(1.4%, 0.9%, 0) scale(1.06);
   }
 }
 
