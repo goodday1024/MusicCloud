@@ -1981,8 +1981,9 @@ function App() {
     }
   }
 
-  async function playTrackFromUi(track) {
+  async function playTrackFromUi(track, options = {}) {
     if (!track) return;
+    const shouldFocus = options.focus !== false;
     if (track.artistCenter) {
       setPanelOpen(true);
       setSelectedTrack(track);
@@ -1994,15 +1995,21 @@ function App() {
     setSelectedTrack(track);
     setHoveredTrack(track);
     setJumpTrack(track);
-    setDeepFocus(true);
-    setJumping(true);
+    setDeepFocus(shouldFocus);
+    setJumping(shouldFocus);
+    if (!shouldFocus) {
+      setJumpTrack(null);
+      window.clearTimeout(playTrackFromUi.timer);
+    }
     const nextQueue = buildPlaybackQueue(track);
     queueRef.current = nextQueue;
     setTrackQueue(nextQueue);
     void playQueueTrack(0).catch((error) => setMessage(error.message || "播放失败"));
     flash(`正在播放 ${track.title || "目标星点"}`);
-    window.clearTimeout(playTrackFromUi.timer);
-    playTrackFromUi.timer = window.setTimeout(() => setJumping(false), 3200);
+    if (shouldFocus) {
+      window.clearTimeout(playTrackFromUi.timer);
+      playTrackFromUi.timer = window.setTimeout(() => setJumping(false), 3200);
+    }
   }
 
   async function runGlobalSearch() {
@@ -2216,7 +2223,7 @@ function App() {
     flash("捕捉小球已释放");
     window.setTimeout(() => {
       setCaptureOrb((current) => current?.id === id ? { ...current, locked: true } : current);
-      void playTrackFromUi(picked);
+      void playTrackFromUi(picked, { focus: false });
       flash(`捕捉到 ${picked.title || "一首歌"}`);
     }, 3200);
     window.setTimeout(() => {
