@@ -190,6 +190,47 @@ canvas {
   background: rgba(255, 210, 122, 0.16);
 }
 
+.select-shell {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 112px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 9px;
+  padding: 5px 9px;
+  font-size: 12px;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+.select-shell.compact {
+  min-width: 104px;
+}
+
+.select-shell span {
+  color: rgba(255, 231, 161, 0.72);
+  font-weight: 700;
+}
+
+.select-shell select {
+  flex: 1;
+  min-width: 0;
+  color: var(--gold);
+  background: transparent;
+  border: 0;
+  outline: none;
+  font: inherit;
+  font-weight: 800;
+}
+
+.select-shell select option {
+  color: #f6f2e6;
+  background: #0b0d14;
+}
+
 .filter,
 .ui-hide-btn {
   flex: 0 0 auto;
@@ -295,6 +336,16 @@ canvas {
   gap: 6px;
   margin-bottom: 6px;
   display: flex;
+}
+
+.search-compact-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.search-select {
+  flex: 1;
 }
 
 .stab {
@@ -1335,6 +1386,15 @@ button.copy-btn {
     font-size: 12px;
   }
 
+  .select-shell {
+    min-width: 106px;
+    padding: 7px 9px;
+  }
+
+  .select-shell.compact {
+    min-width: 96px;
+  }
+
   .filter,
   .ui-hide-btn {
     order: 3;
@@ -1390,9 +1450,14 @@ button.copy-btn {
   }
 
   .seg-btn,
-  .filter {
+  .filter,
+  .select-shell {
     padding: 7px 9px;
     font-size: 12px;
+  }
+
+  .select-shell {
+    min-width: 104px;
   }
 
   .seg {

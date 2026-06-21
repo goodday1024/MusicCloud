@@ -1174,6 +1174,7 @@ function App() {
   const [uiHidden, setUiHidden] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [podcastEnabled, setPodcastEnabled] = useState(() => localStorage.getItem(PODCAST_ENABLED_KEY) !== "false");
+  const [isCompactControls, setIsCompactControls] = useState(false);
   const [panelOpen, setPanelOpen] = useState(true);
   const [savedKeys, setSavedKeys] = useState(() => {
     try {
@@ -1260,6 +1261,19 @@ function App() {
       || [...lyricSegments].reverse().find((segment) => Number(segment.start || 0) <= audioTime)
       || null;
   }, [audioTime, isPlaying, lyricSegments]);
+
+  useEffect(() => {
+    const widthQuery = window.matchMedia("(max-width: 1180px)");
+    const pointerQuery = window.matchMedia("(pointer: coarse)");
+    const updateCompactControls = () => setIsCompactControls(widthQuery.matches || pointerQuery.matches);
+    updateCompactControls();
+    widthQuery.addEventListener?.("change", updateCompactControls);
+    pointerQuery.addEventListener?.("change", updateCompactControls);
+    return () => {
+      widthQuery.removeEventListener?.("change", updateCompactControls);
+      pointerQuery.removeEventListener?.("change", updateCompactControls);
+    };
+  }, []);
 
   function playbackSourceTracks() {
     const source = viewMode === "拾遗"
@@ -2247,18 +2261,37 @@ function App() {
         <div className="title">
           {BRAND_CN} <span className="title-en">{BRAND_EN}</span>
         </div>
-        <div className="seg">
-          {["歌手", "歌单", "封面", "年代", "拾遗"].map((mode) => (
-            <button key={mode} className={`seg-btn ${viewMode === mode ? "on" : ""}`} onClick={() => selectViewMode(mode)} type="button">
-              {mode}
-            </button>
-          ))}
-        </div>
-        {["热门", "最近", "更多"].map((mode) => (
-          <button key={mode} className={`filter ${sortMode === mode ? "on" : ""}`} onClick={() => selectSortMode(mode)} type="button">
-            {mode}
-          </button>
-        ))}
+        {isCompactControls ? (
+          <>
+            <label className="select-shell">
+              <span>视图</span>
+              <select value={viewMode} onChange={(event) => selectViewMode(event.target.value)} aria-label="选择视图">
+                {["歌手", "歌单", "封面", "年代", "拾遗"].map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+              </select>
+            </label>
+            <label className="select-shell compact">
+              <span>排序</span>
+              <select value={sortMode} onChange={(event) => selectSortMode(event.target.value)} aria-label="选择排序">
+                {["热门", "最近", "更多"].map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+              </select>
+            </label>
+          </>
+        ) : (
+          <>
+            <div className="seg">
+              {["歌手", "歌单", "封面", "年代", "拾遗"].map((mode) => (
+                <button key={mode} className={`seg-btn ${viewMode === mode ? "on" : ""}`} onClick={() => selectViewMode(mode)} type="button">
+                  {mode}
+                </button>
+              ))}
+            </div>
+            {["热门", "最近", "更多"].map((mode) => (
+              <button key={mode} className={`filter ${sortMode === mode ? "on" : ""}`} onClick={() => selectSortMode(mode)} type="button">
+                {mode}
+              </button>
+            ))}
+          </>
+        )}
         <button className={`filter ${globalSearchEnabled ? "on danger" : ""}`} type="button" onClick={() => {
           const next = !globalSearchEnabled;
           setGlobalSearchEnabled(next);
@@ -2326,14 +2359,26 @@ function App() {
 
       {!uiHidden && (
       <aside className="search">
-        <div className="search-tabs">
-          {["歌曲", "歌手", "歌单", "年代"].map((mode) => (
-            <button key={mode} className={`stab ${searchMode === mode ? "on" : ""}`} onClick={() => setSearchMode(mode)} type="button">
-              {mode}
-            </button>
-          ))}
-          <button className="stab collapse" onClick={() => setUiHidden((value) => !value)} type="button">⌃</button>
-        </div>
+        {isCompactControls ? (
+          <div className="search-compact-row">
+            <label className="select-shell search-select">
+              <span>搜索</span>
+              <select value={searchMode} onChange={(event) => setSearchMode(event.target.value)} aria-label="选择搜索类型">
+                {["歌曲", "歌手", "歌单", "年代"].map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+              </select>
+            </label>
+            <button className="stab collapse" onClick={() => setUiHidden((value) => !value)} type="button">⌃</button>
+          </div>
+        ) : (
+          <div className="search-tabs">
+            {["歌曲", "歌手", "歌单", "年代"].map((mode) => (
+              <button key={mode} className={`stab ${searchMode === mode ? "on" : ""}`} onClick={() => setSearchMode(mode)} type="button">
+                {mode}
+              </button>
+            ))}
+            <button className="stab collapse" onClick={() => setUiHidden((value) => !value)} type="button">⌃</button>
+          </div>
+        )}
         <form onSubmit={submitSearch}>
           <input className="search-input" value={query} onChange={(event) => setQuery(event.target.value)} disabled={globalSearching} placeholder={globalSearchEnabled ? `全网${searchMode}聚合，回车后等待点击星星` : `${searchMode === "年代" ? "只搜索年代" : searchMode === "歌单" ? "只搜索歌单/专辑" : searchMode === "歌手" ? "只搜索歌手" : "只搜索歌曲"}…`} />
         </form>
