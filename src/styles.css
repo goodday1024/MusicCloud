@@ -93,13 +93,21 @@ canvas {
   pointer-events: none;
   z-index: 20;
   align-items: center;
-  gap: 18px;
+  gap: 10px;
   padding: 16px 20px;
   display: flex;
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.hud-top::-webkit-scrollbar {
+  display: none;
 }
 
 .hud-top > * {
@@ -139,6 +147,7 @@ canvas {
 }
 
 .title {
+  flex: 0 0 auto;
   letter-spacing: 0.18em;
   color: var(--gold);
   font-size: 20px;
@@ -155,6 +164,8 @@ canvas {
 }
 
 .seg {
+  flex: 0 1 auto;
+  min-width: 0;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
   display: flex;
@@ -166,8 +177,12 @@ canvas {
   cursor: pointer;
   background: transparent;
   border: none;
-  padding: 6px 13px;
+  min-width: 44px;
+  padding: 6px 12px;
   font-size: 13px;
+  line-height: 1.15;
+  white-space: nowrap;
+  writing-mode: horizontal-tb;
 }
 
 .seg-btn.on {
@@ -177,14 +192,18 @@ canvas {
 
 .filter,
 .ui-hide-btn {
+  flex: 0 0 auto;
   color: var(--muted);
   cursor: pointer;
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
-  padding: 6px 14px;
+  min-width: fit-content;
+  padding: 6px 12px;
   font-size: 13px;
+  line-height: 1.15;
   white-space: nowrap;
+  writing-mode: horizontal-tb;
 }
 
 .filter.on {
@@ -200,6 +219,7 @@ canvas {
 }
 
 .login-actions {
+  flex: 0 0 auto;
   display: flex;
   gap: 8px;
   align-items: center;
@@ -254,9 +274,10 @@ canvas {
 }
 
 .stat {
+  flex: 0 0 auto;
   color: var(--muted);
   letter-spacing: 0.05em;
-  margin-left: auto;
+  margin-left: 6px;
   font-size: 12px;
   white-space: nowrap;
 }
@@ -266,7 +287,7 @@ canvas {
   width: min(384px, 100vw - 36px);
   max-width: calc(100vw - 36px);
   position: fixed;
-  top: 64px;
+  top: 84px;
   left: 20px;
 }
 

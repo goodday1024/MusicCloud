@@ -7,6 +7,10 @@ const BRAND_CN = "云韶";
 const BRAND_EN = "CaelumShao";
 const LIBRARY_CACHE_KEY = "caelumshao.libraryTracks.v1";
 const PODCAST_ENABLED_KEY = "caelumshao.podcastEnabled.v1";
+const RESOLVED_MUSIC_CACHE_KEY = "caelumshao.resolvedMusicCache.v1";
+const LYRICS_CACHE_KEY = "caelumshao.lyricsCache.v1";
+const PODCAST_CACHE_KEY = "caelumshao.podcastCache.v1";
+const PODCAST_CACHE_TTL = 24 * 60 * 60 * 1000;
 const RENDER_LIMITS = {
   low: { tracks: 520, dust: 7600, mist: 900 },
   high: { tracks: 2400, dust: 52000, mist: 7800 }
@@ -122,6 +126,35 @@ function writeLibraryCache(items = []) {
     console.warn("library cache write failed:", error?.message || error);
   }
   return payload;
+}
+
+function readObjectCache(key) {
+  try {
+    const payload = JSON.parse(localStorage.getItem(key) || "{}");
+    return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function writeObjectCache(key, value, maxEntries = 160) {
+  try {
+    const entries = Object.entries(value || {});
+    const bounded = entries.length > maxEntries
+      ? Object.fromEntries(entries.sort((a, b) => Number(b[1]?.savedAt || 0) - Number(a[1]?.savedAt || 0)).slice(0, maxEntries))
+      : value;
+    localStorage.setItem(key, JSON.stringify(bounded));
+  } catch (error) {
+    console.warn("object cache write failed:", key, error?.message || error);
+  }
+}
+
+function cacheKeyForTrack(track, prefix = "") {
+  const platform = track?.platform || track?.sourcePlatform || "";
+  const id = track?.id || track?.songId || track?.mediaId || "";
+  const title = track?.title || "";
+  const artist = track?.artist || "";
+  return `${prefix}${platform}:${id}:${title}:${artist}`;
 }
 
 async function readJsonResponse(response, fallbackMessage = "接口请求失败") {
@@ -301,7 +334,7 @@ function nebulaLayerColor(point) {
   return color;
 }
 
-function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false, jumping = false, deepFocus = false, globalMode = false, qualityMode = "low", artistQuery = "", onSelect, onHover, onBlankDoubleClick }) {
+function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false, jumping = false, deepFocus = false, globalMode = false, qualityMode = "low", artistQuery = "", resetToken = 0, onSelect, onHover, onBlankDoubleClick }) {
   const mountRef = useRef(null);
   const runtimeRef = useRef(null);
   const tracksRef = useRef(tracks);
@@ -315,11 +348,12 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
   const globalModeRef = useRef(globalMode);
   const qualityModeRef = useRef(qualityMode);
   const artistQueryRef = useRef(artistQuery);
+  const resetTokenRef = useRef(resetToken);
   const onBlankDoubleClickRef = useRef(onBlankDoubleClick);
 
   useEffect(() => {
     tracksRef.current = tracks;
-    runtimeRef.current?.updateInstances();
+    runtimeRef.current?.updateInstances({ resetProgressive: true });
   }, [tracks]);
 
   useEffect(() => {
@@ -357,18 +391,24 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
 
   useEffect(() => {
     globalModeRef.current = globalMode;
-    runtimeRef.current?.updateInstances();
+    runtimeRef.current?.updateInstances({ resetProgressive: true });
   }, [globalMode]);
 
   useEffect(() => {
     qualityModeRef.current = qualityMode;
-    runtimeRef.current?.updateInstances();
+    runtimeRef.current?.updateInstances({ resetProgressive: true });
   }, [qualityMode]);
 
   useEffect(() => {
     artistQueryRef.current = artistQuery;
     runtimeRef.current?.updateInstances();
   }, [artistQuery]);
+
+  useEffect(() => {
+    if (resetTokenRef.current === resetToken) return;
+    resetTokenRef.current = resetToken;
+    runtimeRef.current?.resetCamera();
+  }, [resetToken]);
 
   useEffect(() => {
     const host = mountRef.current;
@@ -597,13 +637,18 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     const pressedKeys = new Set();
     const cameraRight = new THREE.Vector3();
     const cameraForward = new THREE.Vector3();
+    const cameraVelocity = new THREE.Vector3();
     const panDelta = new THREE.Vector3();
+    const rotationVelocity = new THREE.Vector2();
     let dragging = false;
     let lastCenter = null;
     let lastPointerDown = { x: 0, y: 0, time: 0 };
     let wheelZoom = 0.42;
     let wheelZoomTarget = 0.42;
     let raf = 0;
+    let progressiveReady = qualityModeRef.current !== "high";
+    let progressiveTimer = 0;
+    let buildGeneration = 0;
     const zoomBounds = () => {
       const closeFocus = jumpingRef.current || deepFocusRef.current;
       return {
@@ -621,14 +666,30 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       camera.updateProjectionMatrix();
     };
 
-    const updateInstances = () => {
+    const scheduleFullQuality = (generation) => {
+      window.clearTimeout(progressiveTimer);
+      if (qualityModeRef.current !== "high" || progressiveReady) return;
+      progressiveTimer = window.setTimeout(() => {
+        if (generation !== buildGeneration || qualityModeRef.current !== "high") return;
+        progressiveReady = true;
+        updateInstances();
+      }, 180);
+    };
+
+    const updateInstances = (options = {}) => {
+      if (options.resetProgressive) {
+        progressiveReady = qualityModeRef.current !== "high";
+        window.clearTimeout(progressiveTimer);
+      }
+      const generation = ++buildGeneration;
+      const effectiveQuality = qualityModeRef.current === "high" && !progressiveReady ? "low" : qualityModeRef.current;
       const sourceTracks = tracksRef.current.length
         ? pickRenderTracks(
             tracksRef.current,
             selectedKeyRef.current,
             globalModeRef.current
-              ? (GLOBAL_RENDER_LIMITS[qualityModeRef.current]?.tracks || GLOBAL_RENDER_LIMITS.low.tracks)
-              : (RENDER_LIMITS[qualityModeRef.current]?.tracks || RENDER_LIMITS.low.tracks)
+              ? (GLOBAL_RENDER_LIMITS[effectiveQuality]?.tracks || GLOBAL_RENDER_LIMITS.low.tracks)
+              : (RENDER_LIMITS[effectiveQuality]?.tracks || RENDER_LIMITS.low.tracks)
           )
         : Array.from({ length: 220 }, (_, index) => ({
             title: "等待曲库",
@@ -699,9 +760,9 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       });
 
       const renderLimits = globalModeRef.current
-        ? (GLOBAL_RENDER_LIMITS[qualityModeRef.current] || GLOBAL_RENDER_LIMITS.low)
-        : (RENDER_LIMITS[qualityModeRef.current] || RENDER_LIMITS.low);
-      const highQuality = qualityModeRef.current === "high";
+        ? (GLOBAL_RENDER_LIMITS[effectiveQuality] || GLOBAL_RENDER_LIMITS.low)
+        : (RENDER_LIMITS[effectiveQuality] || RENDER_LIMITS.low);
+      const highQuality = effectiveQuality === "high";
       const dustBase = highQuality ? 30000 : 6500;
       const dustPerTrack = highQuality ? 72 : 22;
       const dustCount = Math.max(dustBase, Math.min(renderLimits.dust, Math.max(list.length * dustPerTrack, dustBase)));
@@ -819,6 +880,19 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       beams = new THREE.LineSegments(beamGeometry, beamMaterial);
       beams.visible = beamVertices.length > 0;
       group.add(beams);
+      scheduleFullQuality(generation);
+    };
+
+    const resetCamera = () => {
+      camera.position.set(0, 0, 6);
+      cameraVelocity.set(0, 0, 0);
+      rotationVelocity.set(0, 0);
+      wheelZoom = 0.42;
+      wheelZoomTarget = 0.42;
+      group.position.set(0, 0, 0);
+      group.rotation.x = -0.12;
+      group.rotation.y = 0;
+      group.rotation.z = -0.08;
     };
 
     const setPointerFromEvent = (event) => {
@@ -885,6 +959,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       const dy = center.y - lastCenter.y;
       group.rotation.y += dx * 0.0062;
       group.rotation.x += dy * 0.0046;
+      rotationVelocity.set(dx * 0.00036, dy * 0.00028);
       group.rotation.x = Math.max(-1.08, Math.min(1.08, group.rotation.x));
       lastCenter = center;
     };
@@ -937,16 +1012,19 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       const depthSpeed = closeFocus ? 0.048 : 0.036;
       const panX = (pressedKeys.has("d") || pressedKeys.has("arrowright") ? 1 : 0) - (pressedKeys.has("a") || pressedKeys.has("arrowleft") ? 1 : 0);
       const depth = (pressedKeys.has("w") || pressedKeys.has("arrowup") ? 1 : 0) - (pressedKeys.has("s") || pressedKeys.has("arrowdown") ? 1 : 0);
+      camera.updateMatrixWorld();
+      cameraRight.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+      camera.getWorldDirection(cameraForward).normalize();
       if (panX || depth) {
-        camera.updateMatrixWorld();
-        cameraRight.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
-        camera.getWorldDirection(cameraForward).normalize();
         panDelta.copy(cameraRight).multiplyScalar(panX * panSpeed).addScaledVector(cameraForward, depth * depthSpeed);
-        camera.position.add(panDelta);
-        camera.position.x = Math.max(-5.4, Math.min(5.4, camera.position.x));
-        camera.position.y = Math.max(-3.8, Math.min(3.8, camera.position.y));
-        camera.position.z = Math.max(1.5, Math.min(18.5, camera.position.z));
+        cameraVelocity.add(panDelta.multiplyScalar(0.18));
       }
+      cameraVelocity.multiplyScalar(panX || depth ? 0.9 : 0.94);
+      if (cameraVelocity.lengthSq() < 0.000001) cameraVelocity.set(0, 0, 0);
+      camera.position.add(cameraVelocity);
+      camera.position.x = Math.max(-7.8, Math.min(7.8, camera.position.x));
+      camera.position.y = Math.max(-5.2, Math.min(5.2, camera.position.y));
+      camera.position.z = Math.max(0.7, Math.min(24, camera.position.z));
       const bounds = zoomBounds();
       wheelZoomTarget = Math.max(bounds.min, Math.min(bounds.max, wheelZoomTarget));
       const jumpBoost = jumpingRef.current ? 0.32 : deepFocusRef.current ? 0.18 : 0;
@@ -994,6 +1072,12 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       trackMaterial.size = (closeFocus ? 0.078 : highQuality ? 0.082 : 0.09) * distanceScale * (1 + farAmount * 0.02 + trackTwinkle * 0.2) * (1 - fadeOut * 0.14);
       trackMaterial.opacity = closeFocus ? 0.9 : (highQuality ? 0.8 : 0.88) * (1 - fadeOut * 0.68);
       if (!dragging) {
+        if (rotationVelocity.lengthSq() > 0.0000001) {
+          group.rotation.y += rotationVelocity.x;
+          group.rotation.x += rotationVelocity.y;
+          group.rotation.x = Math.max(-1.08, Math.min(1.08, group.rotation.x));
+          rotationVelocity.multiplyScalar(0.94);
+        }
         const playingSpin = playingRef.current ? (closeFocus ? 0.00018 : hasFocus ? 0.00042 : 0.00115) : 0;
         group.rotation.y += (closeFocus ? 0.00002 : hasFocus ? 0.00008 : 0.00065) + playingSpin + energyRef.current * (closeFocus ? 0.00005 : hasFocus ? 0.00042 : 0.0016);
         group.rotation.x += closeFocus ? 0.00001 : playingRef.current ? 0.000025 : 0;
@@ -1002,7 +1086,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       raf = window.requestAnimationFrame(animate);
     };
 
-    runtimeRef.current = { updateInstances };
+    runtimeRef.current = { updateInstances, resetCamera };
     resize();
     updateInstances();
     animate();
@@ -1020,6 +1104,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
 
     return () => {
       window.cancelAnimationFrame(raf);
+      window.clearTimeout(progressiveTimer);
       host.removeEventListener("pointerdown", onPointerDown);
       host.removeEventListener("pointermove", onPointerMove);
       host.removeEventListener("pointerup", onPointerUp);
@@ -1106,6 +1191,7 @@ function App() {
   const [jumpTrack, setJumpTrack] = useState(null);
   const [jumping, setJumping] = useState(false);
   const [deepFocus, setDeepFocus] = useState(false);
+  const [sphereResetToken, setSphereResetToken] = useState(0);
   const [loginOpen, setLoginOpen] = useState(false);
   const [loginProvider, setLoginProvider] = useState("netease");
   const [loginMode, setLoginMode] = useState("qr");
@@ -1123,6 +1209,10 @@ function App() {
   const queueIndexRef = useRef(-1);
   const playTokenRef = useRef(0);
   const libraryLoadRef = useRef(0);
+  const resolvedMusicCacheRef = useRef(readObjectCache(RESOLVED_MUSIC_CACHE_KEY));
+  const lyricsCacheRef = useRef(readObjectCache(LYRICS_CACHE_KEY));
+  const podcastCacheRef = useRef(readObjectCache(PODCAST_CACHE_KEY));
+  const prefetchingRef = useRef(new Set());
 
   const isNeteaseLoggedIn = Boolean(neteaseState?.loggedIn);
   const isQqMusicLoggedIn = Boolean(qqMusicState?.loggedIn);
@@ -1195,6 +1285,12 @@ function App() {
 
   async function loadLyricsForTrack(track, token) {
     if (!track?.id) return;
+    const key = cacheKeyForTrack(track, "lyrics:");
+    const cached = lyricsCacheRef.current[key];
+    if (cached?.segments && token === playTokenRef.current) {
+      setLyricSegments(Array.isArray(cached.segments) ? cached.segments : []);
+      return;
+    }
     try {
       const response = await fetch("/api/lyrics", {
         method: "POST",
@@ -1209,7 +1305,13 @@ function App() {
       });
       const data = await readJsonResponse(response);
       if (token !== playTokenRef.current) return;
-      setLyricSegments(Array.isArray(data.segments) ? data.segments : []);
+      const segments = Array.isArray(data.segments) ? data.segments : [];
+      setLyricSegments(segments);
+      lyricsCacheRef.current = {
+        ...lyricsCacheRef.current,
+        [key]: { segments, savedAt: Date.now() }
+      };
+      writeObjectCache(LYRICS_CACHE_KEY, lyricsCacheRef.current, 260);
     } catch (error) {
       if (token === playTokenRef.current) setLyricSegments([]);
       console.debug("lyrics unavailable", error?.message || error);
@@ -1470,6 +1572,56 @@ function App() {
     if (audioRef.current) audioRef.current.volume = 1;
   }
 
+  async function resolveTrackMusic(track) {
+    if (!track) return "";
+    const directUrl = track.musicUrl || track.url || "";
+    if (directUrl) return directUrl;
+    const key = cacheKeyForTrack(track, "music:");
+    const cached = resolvedMusicCacheRef.current[key];
+    if (cached?.musicUrl) return cached.musicUrl;
+    const response = await fetch("/api/music/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...track,
+        keyword: track.qqSearchKey || track.musicKeyword || `${track.title || ""} ${track.artist || ""}`.trim()
+      })
+    });
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "原曲解析失败");
+    const musicUrl = data.musicUrl || "";
+    if (musicUrl) {
+      resolvedMusicCacheRef.current = {
+        ...resolvedMusicCacheRef.current,
+        [key]: { musicUrl, savedAt: Date.now() }
+      };
+      writeObjectCache(RESOLVED_MUSIC_CACHE_KEY, resolvedMusicCacheRef.current, 260);
+    }
+    return musicUrl;
+  }
+
+  async function prefetchQueueTrack(index) {
+    const queue = queueRef.current;
+    const track = queue[index];
+    if (!track) return;
+    const key = cacheKeyForTrack(track, "music:");
+    if (track.musicUrl || track.url || resolvedMusicCacheRef.current[key]?.musicUrl || prefetchingRef.current.has(key)) return;
+    prefetchingRef.current.add(key);
+    try {
+      const musicUrl = await resolveTrackMusic(track);
+      if (musicUrl && queueRef.current[index] && trackKey(queueRef.current[index]) === trackKey(track)) {
+        const nextQueue = [...queueRef.current];
+        nextQueue[index] = { ...nextQueue[index], musicUrl };
+        queueRef.current = nextQueue;
+        setTrackQueue(nextQueue);
+      }
+    } catch (error) {
+      console.debug("prefetch next track failed:", error?.message || error);
+    } finally {
+      prefetchingRef.current.delete(key);
+    }
+  }
+
   async function startTtsPodcastOverlay(track, token) {
     if (!track || !podcastEnabledRef.current) return;
     const musicAudio = audioRef.current;
@@ -1479,16 +1631,30 @@ function App() {
       return;
     }
     try {
-      const response = await fetch("/api/track/tts-podcast", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          track,
-          currentTime: musicAudio.currentTime || 0
-        })
-      });
-      const data = await readJsonResponse(response);
-      if (!response.ok || !data.audioUrl) throw new Error(data.error || "播客语音生成失败");
+      const key = cacheKeyForTrack(track, "podcast:");
+      let data = podcastCacheRef.current[key];
+      const cacheFresh = data?.audioUrl && Date.now() - Number(data.savedAt || 0) < PODCAST_CACHE_TTL;
+      if (!cacheFresh) {
+        const response = await fetch("/api/track/tts-podcast", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            track,
+            currentTime: musicAudio.currentTime || 0
+          })
+        });
+        data = await readJsonResponse(response);
+        if (!response.ok || !data.audioUrl) throw new Error(data.error || "播客语音生成失败");
+        podcastCacheRef.current = {
+          ...podcastCacheRef.current,
+          [key]: {
+            audioUrl: data.audioUrl,
+            lyricSegments: Array.isArray(data.lyricSegments) ? data.lyricSegments : [],
+            savedAt: Date.now()
+          }
+        };
+        writeObjectCache(PODCAST_CACHE_KEY, podcastCacheRef.current, 120);
+      }
       if (token !== playTokenRef.current) return;
       podcastAudio.src = data.audioUrl;
       podcastAudio.volume = 1;
@@ -1505,6 +1671,13 @@ function App() {
     } catch (error) {
       console.warn("tts podcast overlay failed:", error?.message || error);
       if (token === playTokenRef.current) {
+        const key = cacheKeyForTrack(track, "podcast:");
+        if (podcastCacheRef.current[key]) {
+          const nextCache = { ...podcastCacheRef.current };
+          delete nextCache[key];
+          podcastCacheRef.current = nextCache;
+          writeObjectCache(PODCAST_CACHE_KEY, nextCache, 120);
+        }
         if (audioRef.current) audioRef.current.volume = 1;
         setMessage(error.message || "播客语音接入失败，音乐继续播放");
       }
@@ -1537,22 +1710,9 @@ function App() {
       return true;
     };
 
-    const resolveOriginal = async () => {
-      const response = await fetch("/api/music/resolve", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...track,
-          keyword: track.qqSearchKey || track.musicKeyword || `${track.title || ""} ${track.artist || ""}`.trim()
-        })
-      });
-      const data = await readJsonResponse(response);
-      if (!response.ok) throw new Error(data.error || "原曲解析失败");
-      return data.musicUrl || "";
-    };
-
     try {
-      const originalUrl = track.musicUrl || track.url || await resolveOriginal();
+      const originalUrl = await resolveTrackMusic(track);
+      if (!originalUrl) throw new Error("原曲解析失败：没有可播放链接");
       const playMessage = podcastEnabledRef.current
         ? `音乐已播放 ${index + 1}/${queue.length || 1}，正在后台生成播客`
         : `音乐已播放 ${index + 1}/${queue.length || 1}`;
@@ -1562,6 +1722,7 @@ function App() {
         queueRef.current = [...queue];
         setTrackQueue([...queue]);
         void loadLyricsForTrack(track, token);
+        void prefetchQueueTrack(index + 1);
         window.setTimeout(() => {
           if (token === playTokenRef.current && podcastEnabledRef.current) void startTtsPodcastOverlay({ ...track, musicUrl: originalUrl }, token);
         }, 1200);
@@ -1906,6 +2067,14 @@ function App() {
     flash(`${mode} 排列`);
   }
 
+  function resetNebulaView() {
+    setDeepFocus(false);
+    setJumping(false);
+    setJumpTrack(null);
+    setSphereResetToken((value) => value + 1);
+    flash("已回到星云中心");
+  }
+
   async function shareTrack() {
     if (!displayTrack) return;
     const title = `${BRAND_CN} · ${displayTrack.title || "歌曲"}`;
@@ -2095,6 +2264,9 @@ function App() {
         <button className={`filter ${qualityMode === "high" ? "on" : ""}`} type="button" onClick={() => setQualityMode((mode) => mode === "high" ? "low" : "high")}>
           {qualityMode === "high" ? "高画质" : "低画质"}
         </button>
+        <button className="filter" type="button" onClick={resetNebulaView}>
+          回中心
+        </button>
         <button className={`filter settings-trigger ${settingsOpen ? "on" : ""}`} type="button" onClick={() => setSettingsOpen((value) => !value)}>
           设置
         </button>
@@ -2192,6 +2364,7 @@ function App() {
         globalMode={globalSearchEnabled}
         qualityMode={qualityMode}
         artistQuery={searchMode === "歌手" ? query : ""}
+        resetToken={sphereResetToken}
         selectedKey={trackKey(selectedTrack)}
         onSelect={selectSphereTrack}
         onHover={setHoveredTrack}
