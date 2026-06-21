@@ -70,6 +70,18 @@ button {
   animation: starDrift 54s linear infinite;
 }
 
+.cloud-stage::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0.72), transparent 12%, transparent 84%, rgba(0, 0, 0, 0.8)),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.76), transparent 9%, transparent 86%, rgba(0, 0, 0, 0.78)),
+    radial-gradient(ellipse at center, transparent 48%, rgba(0, 0, 0, 0.42) 100%);
+}
+
 .space-field {
   position: fixed;
   inset: -16%;
@@ -479,10 +491,9 @@ canvas {
 
 .song-sphere {
   position: fixed;
-  left: 4vw;
-  top: 10vh;
-  width: 88vw;
-  height: 86vh;
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
   z-index: 4;
   touch-action: none;
   cursor: crosshair;
@@ -1425,10 +1436,6 @@ button.copy-btn {
     left: 16px;
   }
 
-  .song-sphere {
-    top: 12vh;
-    height: 84vh;
-  }
 }
 
 @media (max-width: 600px) {
@@ -1496,13 +1503,6 @@ button.copy-btn {
   .top-lyric span {
     font-size: 16px;
     letter-spacing: 0.04em;
-  }
-
-  .song-sphere {
-    left: -24vw;
-    top: 18vh;
-    width: 148vw;
-    height: 62vh;
   }
 
   .poem-panel,
