@@ -631,7 +631,8 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     const hoverStarColor = new THREE.Color(0xfff2bd);
     const mistColor = new THREE.Color(0xf5e8c8);
     const raycaster = new THREE.Raycaster();
-    raycaster.params.Points.threshold = 0.075;
+    const isCoarsePointer = window.matchMedia?.("(pointer: coarse)")?.matches || false;
+    raycaster.params.Points.threshold = isCoarsePointer ? 0.24 : 0.075;
     const pointer = new THREE.Vector2();
     const activePointers = new Map();
     const pressedKeys = new Set();
@@ -968,7 +969,9 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       activePointers.delete(event.pointerId);
       host.releasePointerCapture?.(event.pointerId);
       const moved = Math.hypot(event.clientX - lastPointerDown.x, event.clientY - lastPointerDown.y);
-      if (moved < 7 && Date.now() - lastPointerDown.time < 420 && trackCloud) {
+      const tapMoveLimit = isCoarsePointer ? 18 : 7;
+      const tapTimeLimit = isCoarsePointer ? 620 : 420;
+      if (moved < tapMoveLimit && Date.now() - lastPointerDown.time < tapTimeLimit && trackCloud) {
         const instanceId = hitTest(event);
         if (Number.isFinite(instanceId)) selectInstance(instanceId);
       }
@@ -1069,7 +1072,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       const distanceScale = Math.max(0.88, Math.min(1.12, 7.4 / Math.max(2.2, camera.position.z)));
       dustMaterial.size = (closeFocus ? 0.009 : highQuality ? 0.012 : 0.014) * distanceScale * (1 + farAmount * 0.02 + dustTwinkle * 0.25) * (1 - fadeOut * 0.2);
       dustMaterial.opacity = closeFocus ? 0.82 : (highQuality ? 0.72 : 0.82) * (1 - fadeOut * 0.72);
-      trackMaterial.size = (closeFocus ? 0.078 : highQuality ? 0.082 : 0.09) * distanceScale * (1 + farAmount * 0.02 + trackTwinkle * 0.2) * (1 - fadeOut * 0.14);
+      trackMaterial.size = (closeFocus ? 0.078 : highQuality ? 0.082 : 0.09) * (isCoarsePointer ? 1.34 : 1) * distanceScale * (1 + farAmount * 0.02 + trackTwinkle * 0.2) * (1 - fadeOut * 0.14);
       trackMaterial.opacity = closeFocus ? 0.9 : (highQuality ? 0.8 : 0.88) * (1 - fadeOut * 0.68);
       if (!dragging) {
         if (rotationVelocity.lengthSq() > 0.0000001) {

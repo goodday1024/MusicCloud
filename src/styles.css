@@ -1296,6 +1296,81 @@ button.copy-btn {
   border-radius: 4px;
 }
 
+@media (min-width: 601px) and (max-width: 1180px) {
+  .hud-top {
+    align-content: flex-start;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: calc(12px + env(safe-area-inset-top)) 16px 10px;
+    overflow-x: hidden;
+  }
+
+  .title {
+    order: 1;
+    width: 246px;
+    font-size: 18px;
+    letter-spacing: 0.12em;
+  }
+
+  .title-en {
+    letter-spacing: 0.18em;
+    font-size: 10px;
+  }
+
+  .seg {
+    order: 2;
+    max-width: min(360px, calc(100vw - 520px));
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .seg::-webkit-scrollbar {
+    display: none;
+  }
+
+  .seg-btn {
+    min-width: 38px;
+    padding: 7px 10px;
+    font-size: 12px;
+  }
+
+  .filter,
+  .ui-hide-btn {
+    order: 3;
+    padding: 7px 10px;
+    font-size: 12px;
+  }
+
+  .filter:nth-of-type(3),
+  .stat {
+    display: none;
+  }
+
+  .login-actions {
+    order: 30;
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .login-entry,
+  .login-chip {
+    max-width: 190px;
+    padding: 7px 11px;
+  }
+
+  .search {
+    top: calc(112px + env(safe-area-inset-top));
+    width: min(386px, calc(100vw - 40px));
+    left: 16px;
+  }
+
+  .song-sphere {
+    top: 12vh;
+    height: 84vh;
+  }
+}
+
 @media (max-width: 600px) {
   .hud-top {
     padding: calc(8px + env(safe-area-inset-top)) 10px 8px;
