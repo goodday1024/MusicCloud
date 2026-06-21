@@ -55,6 +55,7 @@ const musicPlatforms = (process.env.MUSIC_API_PLATFORMS || "kugou,qq,netease,kuw
 const neteaseApiBaseUrl = process.env.NETEASE_API_BASE_URL?.replace(/\/$/, "") || "";
 const neteaseStateFile = path.join(dataDir, "netease.json");
 const qqMusicStateFile = path.join(dataDir, "qqmusic.json");
+const inviteCodesFile = path.join(dataDir, "invite-codes.json");
 const qqMusicQrAppId = process.env.QQMUSIC_QR_APPID || "716027609";
 const qqMusicQrCallback = process.env.QQMUSIC_QR_CALLBACK || "https://y.qq.com/portal/profile.html";
 const qqMusicQrConfigs = [
@@ -524,6 +525,68 @@ async function saveQQMusicState(state) {
   await writeFile(qqMusicStateFile, JSON.stringify(state, null, 2), "utf8");
 }
 
+function normalizeInviteCodes(codes = []) {
+  return [...new Set((Array.isArray(codes) ? codes : []).map((item) => String(item || "").trim()).filter(Boolean))];
+}
+
+function normalizeInviteEntry(entry = {}) {
+  if (typeof entry === "string") {
+    return { code: entry.trim(), createdAt: "", usedAt: "" };
+  }
+  return {
+    code: String(entry.code || "").trim(),
+    createdAt: String(entry.createdAt || ""),
+    usedAt: String(entry.usedAt || "")
+  };
+}
+
+async function readInviteCodes() {
+  if (!existsSync(inviteCodesFile)) return [];
+  try {
+    const raw = await readFile(inviteCodesFile, "utf8");
+    const payload = JSON.parse(raw);
+    const entries = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload.codes)
+        ? payload.codes
+        : [];
+    return entries.map(normalizeInviteEntry).filter((item) => item.code);
+  } catch (error) {
+    console.warn("readInviteCodes failed, using empty list:", error.message);
+    return [];
+  }
+}
+
+async function saveInviteCodes(codes = []) {
+  const nextCodes = normalizeInviteCodes(codes);
+  const current = await readInviteCodes();
+  const currentMap = new Map(current.map((entry) => [entry.code, entry]));
+  for (const code of nextCodes) {
+    const existing = currentMap.get(code);
+    if (existing) continue;
+    currentMap.set(code, { code, createdAt: new Date().toISOString(), usedAt: "" });
+  }
+  const merged = [...currentMap.values()];
+  await writeFile(inviteCodesFile, JSON.stringify({ updatedAt: new Date().toISOString(), codes: merged }, null, 2), "utf8");
+  return merged;
+}
+
+async function consumeInviteCode(code = "") {
+  const target = String(code || "").trim();
+  if (!target) return { ok: false, reason: "empty" };
+  const entries = await readInviteCodes();
+  const index = entries.findIndex((entry) => entry.code === target && !entry.usedAt);
+  if (index === -1) return { ok: false, reason: "not_found" };
+  entries[index] = { ...entries[index], usedAt: new Date().toISOString() };
+  await writeFile(inviteCodesFile, JSON.stringify({ updatedAt: new Date().toISOString(), codes: entries }, null, 2), "utf8");
+  return { ok: true };
+}
+
+async function listUnusedInviteCodes() {
+  const entries = await readInviteCodes();
+  return entries.filter((entry) => !entry.usedAt).map((entry) => entry.code);
+}
+
 function cookieHeaderFromState(state) {
   return (state?.cookies || []).join("; ");
 }
@@ -539,8 +602,10 @@ function cookieObjectFromList(cookies = []) {
 }
 
 function serializeQQMusicState(state) {
+  const hasCredential = Boolean(state?.api1Credential?.musicid && state?.api1Credential?.musickey);
+  const hasIdentity = Boolean(state?.uin || state?.profile?.nick || state?.profile?.creator?.hostname || hasCredential);
   return {
-    loggedIn: Boolean(state?.loggedIn),
+    loggedIn: Boolean(state?.loggedIn && hasIdentity),
     uin: state?.uin || "",
     profile: state?.profile || null,
     qrSig: state?.qrSig || "",
@@ -550,7 +615,7 @@ function serializeQQMusicState(state) {
     qrConfigIndex: state?.qrConfigIndex || 0,
     qrConfigLabel: state?.qrConfigLabel || "",
     qrNeedsRefresh: Boolean(state?.qrNeedsRefresh),
-    provider: state?.api1Credential?.musickey ? "QQMusicApi1" : "qq-music-api",
+    provider: hasCredential ? "QQMusicApi1" : "qq-music-api",
     updatedAt: state?.updatedAt || ""
   };
 }
@@ -1790,8 +1855,9 @@ async function createTrackPodcastEpisode({ track, prompt, voice, memory, cookie,
 }
 
 function serializeNeteaseState(state) {
+  const hasIdentity = Boolean(state?.uid || state?.profile?.userId || state?.profile?.nickname);
   return {
-    loggedIn: Boolean(state?.loggedIn),
+    loggedIn: Boolean(state?.loggedIn && hasIdentity),
     uid: state?.uid || "",
     profile: state?.profile || null,
     qrKey: state?.qrKey || "",
@@ -4056,6 +4122,42 @@ app.get("/api/config", (_req, res) => {
 app.get("/api/memory", async (_req, res, next) => {
   try {
     res.json(await readMemory());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/invites", async (_req, res, next) => {
+  try {
+    res.json({ codes: await listUnusedInviteCodes() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/invites", async (req, res, next) => {
+  try {
+    const codes = Array.isArray(req.body?.codes) ? req.body.codes : [];
+    await saveInviteCodes(codes);
+    res.json({ codes: await listUnusedInviteCodes() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/invites/consume", async (req, res, next) => {
+  try {
+    const code = String(req.body?.code || "").trim();
+    if (!code) {
+      res.status(400).json({ error: "缺少邀请码" });
+      return;
+    }
+    const result = await consumeInviteCode(code);
+    if (!result.ok) {
+      res.status(404).json({ error: "邀请码不存在或已使用" });
+      return;
+    }
+    res.json({ ok: true });
   } catch (error) {
     next(error);
   }

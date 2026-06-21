@@ -11,6 +11,9 @@ const RESOLVED_MUSIC_CACHE_KEY = "caelumshao.resolvedMusicCache.v1";
 const LYRICS_CACHE_KEY = "caelumshao.lyricsCache.v1";
 const PODCAST_CACHE_KEY = "caelumshao.podcastCache.v1";
 const PODCAST_CACHE_TTL = 24 * 60 * 60 * 1000;
+const ADMIN_PASSWORD_KEY = "caelumshao.adminPassword.v1";
+const ACCESS_GRANTED_KEY = "caelumshao.accessGranted.v1";
+const DEFAULT_ADMIN_PASSWORD = "admin123456";
 const RENDER_LIMITS = {
   low: { tracks: 520, dust: 7600, mist: 900 },
   high: { tracks: 2400, dust: 52000, mist: 7800 }
@@ -64,6 +67,11 @@ function safeFileName(value, fallback = "caelumshao") {
     .replace(/[\\/:*?"<>|#%{}[\]^~`]/g, "")
     .replace(/\s+/g, "-")
     .slice(0, 48) || fallback;
+}
+
+function normalizePath(pathname = "") {
+  const trimmed = String(pathname || "/").replace(/\/+$/, "");
+  return trimmed || "/";
 }
 
 function readLibraryCache() {
@@ -126,6 +134,31 @@ function writeLibraryCache(items = []) {
     console.warn("library cache write failed:", error?.message || error);
   }
   return payload;
+}
+
+function readAccessGranted() {
+  try {
+    return localStorage.getItem(ACCESS_GRANTED_KEY) === "true";
+  } catch (_error) {
+    return false;
+  }
+}
+
+function randomInviteCode(length = 10) {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let index = 0; index < length; index += 1) {
+    code += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return `YS-${code}`;
+}
+
+function readAdminPassword() {
+  try {
+    return localStorage.getItem(ADMIN_PASSWORD_KEY) || DEFAULT_ADMIN_PASSWORD;
+  } catch (_error) {
+    return DEFAULT_ADMIN_PASSWORD;
+  }
 }
 
 function readObjectCache(key) {
@@ -641,8 +674,12 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     const cameraVelocity = new THREE.Vector3();
     const panDelta = new THREE.Vector3();
     const rotationVelocity = new THREE.Vector2();
+    const touchHoverTimer = { id: 0 };
+    const touchPanVelocity = new THREE.Vector3();
     let dragging = false;
     let lastCenter = null;
+    let lastTouchDistance = 0;
+    let touchHoverPointerId = null;
     let lastPointerDown = { x: 0, y: 0, time: 0 };
     let wheelZoom = 0.42;
     let wheelZoomTarget = 0.42;
@@ -944,8 +981,17 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
       host.setPointerCapture?.(event.pointerId);
       dragging = true;
+      if (isCoarsePointer) {
+        window.clearTimeout(touchHoverTimer.id);
+        touchHoverPointerId = event.pointerId;
+      }
       lastCenter = centerFromPointers();
       lastPointerDown = { x: event.clientX, y: event.clientY, time: Date.now() };
+      const pointers = [...activePointers.values()];
+      if (pointers.length === 2) {
+        const [a, b] = pointers;
+        lastTouchDistance = Math.hypot(a.x - b.x, a.y - b.y);
+      }
     };
 
     const onPointerMove = (event) => {
@@ -954,13 +1000,35 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
         return;
       }
       activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (isCoarsePointer && touchHoverPointerId === event.pointerId) {
+        const moved = Math.hypot(event.clientX - lastPointerDown.x, event.clientY - lastPointerDown.y);
+        if (moved > 10) window.clearTimeout(touchHoverTimer.id);
+      }
       const center = centerFromPointers();
       if (!dragging || !center || !lastCenter) return;
+      const pointers = [...activePointers.values()];
+      if (isCoarsePointer && pointers.length === 2) {
+        const [a, b] = pointers;
+        const distance = Math.hypot(a.x - b.x, a.y - b.y);
+        if (lastTouchDistance > 0) {
+          const bounds = zoomBounds();
+          wheelZoomTarget = Math.max(bounds.min, Math.min(bounds.max, wheelZoomTarget + (distance - lastTouchDistance) * 0.012));
+        }
+        lastTouchDistance = distance;
+      }
       const dx = center.x - lastCenter.x;
       const dy = center.y - lastCenter.y;
-      group.rotation.y += dx * 0.0062;
-      group.rotation.x += dy * 0.0046;
-      rotationVelocity.set(dx * 0.00036, dy * 0.00028);
+      if (isCoarsePointer && activePointers.size === 1) {
+        const panScale = Math.max(0.0026, Math.min(0.0052, 1 / Math.max(240, renderer.domElement.getBoundingClientRect().width)));
+        cameraVelocity.addScaledVector(cameraRight, -dx * panScale);
+        cameraVelocity.addScaledVector(cameraForward, dy * panScale * 0.72);
+        touchPanVelocity.set(-dx * panScale, dy * panScale, 0);
+        rotationVelocity.multiplyScalar(0.92);
+      } else {
+        group.rotation.y += dx * 0.0062;
+        group.rotation.x += dy * 0.0046;
+        rotationVelocity.set(dx * 0.00036, dy * 0.00028);
+      }
       group.rotation.x = Math.max(-1.08, Math.min(1.08, group.rotation.x));
       lastCenter = center;
     };
@@ -975,6 +1043,11 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
         const instanceId = hitTest(event);
         if (Number.isFinite(instanceId)) selectInstance(instanceId);
       }
+      if (isCoarsePointer && touchHoverPointerId === event.pointerId) {
+        window.clearTimeout(touchHoverTimer.id);
+        touchHoverPointerId = null;
+      }
+      if (activePointers.size < 2) lastTouchDistance = 0;
       lastCenter = centerFromPointers();
       dragging = activePointers.size > 0;
     };
@@ -990,6 +1063,18 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     const onDoubleClick = (event) => {
       if (Number.isFinite(hitTest(event))) return;
       onBlankDoubleClickRef.current?.({ x: event.clientX, y: event.clientY });
+    };
+
+    const scheduleTouchHover = (event) => {
+      if (!isCoarsePointer || activePointers.size !== 1) return;
+      window.clearTimeout(touchHoverTimer.id);
+      const { pointerId } = event;
+      touchHoverPointerId = pointerId;
+      touchHoverTimer.id = window.setTimeout(() => {
+        if (touchHoverPointerId !== pointerId || !activePointers.has(pointerId)) return;
+        const instanceId = hitTest(event);
+        if (Number.isFinite(instanceId)) setHover(instanceId);
+      }, 260);
     };
 
     const shouldIgnoreKeyboardPan = () => {
@@ -1075,6 +1160,9 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       trackMaterial.size = (closeFocus ? 0.078 : highQuality ? 0.082 : 0.09) * (isCoarsePointer ? 1.34 : 1) * distanceScale * (1 + farAmount * 0.02 + trackTwinkle * 0.2) * (1 - fadeOut * 0.14);
       trackMaterial.opacity = closeFocus ? 0.9 : (highQuality ? 0.8 : 0.88) * (1 - fadeOut * 0.68);
       if (!dragging) {
+        if (isCoarsePointer && touchPanVelocity.lengthSq() > 0.0000001) {
+          touchPanVelocity.multiplyScalar(0.9);
+        }
         if (rotationVelocity.lengthSq() > 0.0000001) {
           group.rotation.y += rotationVelocity.x;
           group.rotation.x += rotationVelocity.y;
@@ -1099,6 +1187,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     host.addEventListener("pointercancel", onPointerUp);
     host.addEventListener("wheel", onWheel, { passive: false });
     host.addEventListener("dblclick", onDoubleClick);
+    host.addEventListener("pointerdown", scheduleTouchHover);
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     const onPointerLeave = () => setHover(null);
@@ -1108,12 +1197,14 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     return () => {
       window.cancelAnimationFrame(raf);
       window.clearTimeout(progressiveTimer);
+      window.clearTimeout(touchHoverTimer.id);
       host.removeEventListener("pointerdown", onPointerDown);
       host.removeEventListener("pointermove", onPointerMove);
       host.removeEventListener("pointerup", onPointerUp);
       host.removeEventListener("pointercancel", onPointerUp);
       host.removeEventListener("wheel", onWheel);
       host.removeEventListener("dblclick", onDoubleClick);
+      host.removeEventListener("pointerdown", scheduleTouchHover);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       host.removeEventListener("pointerleave", onPointerLeave);
@@ -1144,6 +1235,16 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
 }
 
 function App() {
+  const isAdminRoute = normalizePath(window.location.pathname) === "/admin";
+  const [accessGranted, setAccessGranted] = useState(() => readAccessGranted());
+  const [inviteInput, setInviteInput] = useState("");
+  const [accessMessage, setAccessMessage] = useState("");
+  const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [adminPasswordInput, setAdminPasswordInput] = useState("");
+  const [adminPassword, setAdminPassword] = useState(() => readAdminPassword());
+  const [inviteCodes, setInviteCodes] = useState([]);
+  const [inviteDraft, setInviteDraft] = useState("");
+  const [batchInviteCount, setBatchInviteCount] = useState(10);
   const [neteaseState, setNeteaseState] = useState(null);
   const [qqMusicState, setQqMusicState] = useState(null);
   const [libraryCacheMeta, setLibraryCacheMeta] = useState(() => readLibraryCache());
@@ -1218,14 +1319,21 @@ function App() {
   const podcastCacheRef = useRef(readObjectCache(PODCAST_CACHE_KEY));
   const prefetchingRef = useRef(new Set());
 
-  const isNeteaseLoggedIn = Boolean(neteaseState?.loggedIn);
-  const isQqMusicLoggedIn = Boolean(qqMusicState?.loggedIn);
+  const isNeteaseLoggedIn = Boolean(neteaseState?.loggedIn && (neteaseState?.uid || neteaseState?.profile?.userId || neteaseState?.profile?.nickname));
+  const isQqMusicLoggedIn = Boolean(qqMusicState?.loggedIn && (qqMusicState?.uin || qqMusicState?.profile?.nick || qqMusicState?.profile?.creator?.hostname || qqMusicState?.provider === "QQMusicApi1"));
   const isLoggedIn = isNeteaseLoggedIn || isQqMusicLoggedIn;
+  const accountLabel = isNeteaseLoggedIn && isQqMusicLoggedIn
+    ? "已登录"
+    : isNeteaseLoggedIn
+      ? (neteaseState?.profile?.nickname || "网易云已登录")
+      : isQqMusicLoggedIn
+        ? (qqMusicState?.profile?.creator?.hostname || qqMusicState?.profile?.nick || qqMusicState?.uin || "QQ 音乐已登录")
+        : "账户登录";
   const showPlayer = Boolean(playerSource || trackQueue.length);
   const starTracks = useMemo(() => {
     const source = viewMode === "拾遗" ? Object.values(savedTrackItems) : globalSearchEnabled ? globalTracks : libraryTracks;
-    return withArtistCenters(source, globalSearchEnabled && viewMode !== "拾遗");
-  }, [globalSearchEnabled, globalTracks, libraryTracks, savedTrackItems, viewMode]);
+    return withArtistCenters(source, globalSearchEnabled && searchMode === "歌手" && viewMode !== "拾遗");
+  }, [globalSearchEnabled, globalTracks, libraryTracks, savedTrackItems, searchMode, viewMode]);
   const filteredTracks = useMemo(() => {
     const base = starTracks.filter((track) => {
       if (viewMode === "拾遗") return !track.artistCenter && savedKeys.has(trackKey(track));
@@ -1262,6 +1370,157 @@ function App() {
       || null;
   }, [audioTime, isPlaying, lyricSegments]);
 
+  const adminPage = (
+    <section className="admin-panel" role="dialog" aria-modal="true" aria-label="管理员页面">
+      <div className="admin-card">
+        <button className="panel-close" aria-label="关闭管理员页面" type="button" onClick={() => window.history.replaceState(null, "", window.location.origin + window.location.pathname.replace(/\/admin\/?$/, ""))}>×</button>
+        <div className="settings-title">管理员页面</div>
+        {!adminUnlocked ? (
+          <form className="admin-password-form" onSubmit={submitAdminPassword}>
+            <label>
+              <span>管理员密码</span>
+              <input
+                value={adminPasswordInput}
+                onChange={(event) => setAdminPasswordInput(event.target.value)}
+                placeholder="初始密码：admin123456"
+                type="password"
+              />
+            </label>
+            <div className="admin-row">
+              <button type="submit">验证密码</button>
+              <button type="button" onClick={() => window.history.replaceState(null, "", normalizePath(window.location.pathname).replace(/\/admin$/, ""))}>返回</button>
+            </div>
+          </form>
+        ) : (
+          <>
+            <form className="admin-form" onSubmit={saveAdminSettings}>
+              <label>
+                <span>单个邀请码</span>
+                <input value={inviteDraft} onChange={(event) => setInviteDraft(event.target.value)} placeholder="输入新的邀请码" />
+              </label>
+              <div className="admin-row">
+                <button type="submit">追加到池中</button>
+                <button type="button" onClick={() => {
+                  if (!inviteCodes.length) return;
+                  navigator.clipboard?.writeText(inviteCodes.join("\n")).catch(() => null);
+                  setAccessMessage("已复制全部邀请码");
+                }}>复制全部</button>
+                <button type="button" onClick={() => refreshInviteCodes().catch((error) => setAccessMessage(error.message || "邀请码刷新失败"))}>刷新列表</button>
+              </div>
+            </form>
+            <form className="admin-form" onSubmit={(event) => {
+              event.preventDefault();
+              const count = Math.max(1, Math.min(200, Number(batchInviteCount) || 0));
+              const generated = Array.from({ length: count }, () => randomInviteCode());
+              void (async () => {
+                const nextCodes = [...new Set([...generated, ...inviteCodes])];
+                const response = await fetch("/api/invites", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ codes: nextCodes })
+                });
+                const data = await readJsonResponse(response);
+                if (!response.ok) throw new Error(data.error || "邀请码批量保存失败");
+                setInviteCodes(Array.isArray(data.codes) ? data.codes : nextCodes);
+                setInviteDraft("");
+                setAccessMessage(`已批量生成 ${generated.length} 个邀请码`);
+              })().catch((error) => setAccessMessage(error.message || "邀请码批量保存失败"));
+            }}>
+              <label>
+                <span>批量生成</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="200"
+                  value={batchInviteCount}
+                  onChange={(event) => setBatchInviteCount(event.target.value)}
+                  placeholder="1 - 200"
+                />
+              </label>
+              <div className="admin-row">
+                <button type="submit">一键生成</button>
+                <button type="button" onClick={() => {
+                  const generated = Array.from({ length: 20 }, () => randomInviteCode());
+                  void (async () => {
+                    const nextCodes = [...new Set([...generated, ...inviteCodes])];
+                    const response = await fetch("/api/invites", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ codes: nextCodes })
+                    });
+                    const data = await readJsonResponse(response);
+                    if (!response.ok) throw new Error(data.error || "邀请码保存失败");
+                    setInviteCodes(Array.isArray(data.codes) ? data.codes : nextCodes);
+                    setAccessMessage("已快速生成 20 个邀请码");
+                  })().catch((error) => setAccessMessage(error.message || "邀请码保存失败"));
+                }}>生成 20 个</button>
+              </div>
+            </form>
+            <div className="invite-list">
+              <div className="invite-list-title">当前邀请码</div>
+              <div className="invite-list-body">
+                {inviteCodes.length ? inviteCodes.map((code) => (
+                  <button
+                    key={code}
+                    className="invite-pill"
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard?.writeText(code).catch(() => null);
+                      setAccessMessage(`已复制 ${code}`);
+                    }}
+                  >
+                    {code}
+                  </button>
+                )) : <span className="invite-list-empty">还没有邀请码，先批量生成一批吧</span>}
+              </div>
+            </div>
+            <form className="admin-password-form" onSubmit={(event) => {
+              event.preventDefault();
+              const nextPassword = adminPasswordInput.trim();
+              if (!nextPassword) {
+                setAccessMessage("请输入新密码");
+                return;
+              }
+              setAdminPassword(nextPassword);
+              setAdminPasswordInput("");
+              setAccessMessage("管理员密码已更新");
+            }}>
+              <label>
+                <span>修改管理员密码</span>
+                <input
+                  value={adminPasswordInput}
+                  onChange={(event) => setAdminPasswordInput(event.target.value)}
+                  placeholder="输入新密码"
+                  type="password"
+                />
+              </label>
+              <div className="admin-row">
+                <button type="submit">更新密码</button>
+                <button type="button" onClick={() => setAdminUnlocked(false)}>退出编辑</button>
+              </div>
+            </form>
+          </>
+        )}
+      </div>
+    </section>
+  );
+
+  useEffect(() => {
+    localStorage.setItem(ACCESS_GRANTED_KEY, accessGranted ? "true" : "false");
+  }, [accessGranted]);
+
+  useEffect(() => {
+    localStorage.setItem(ADMIN_PASSWORD_KEY, adminPassword);
+  }, [adminPassword]);
+
+  if (isAdminRoute) {
+    return (
+      <main className="app cloud-stage">
+        {adminPage}
+      </main>
+    );
+  }
+
   useEffect(() => {
     const widthQuery = window.matchMedia("(max-width: 1180px)");
     const pointerQuery = window.matchMedia("(pointer: coarse)");
@@ -1282,6 +1541,69 @@ function App() {
         ? globalTracks
         : libraryTracks;
     return source.filter((item) => item && !item.artistCenter && !item.placeholder);
+  }
+
+  function submitInviteCode(event) {
+    event?.preventDefault?.();
+    const trimmed = inviteInput.trim();
+    if (!trimmed) {
+      setAccessMessage("请输入邀请码");
+      return;
+    }
+    void (async () => {
+      const response = await fetch("/api/invites/consume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: trimmed })
+      });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "邀请码不正确或已使用");
+      setAccessGranted(true);
+      setAccessMessage("邀请码已通过");
+      setInviteInput("");
+      await refreshInviteCodes().catch(() => null);
+    })().catch((error) => setAccessMessage(error.message || "邀请码不正确或已使用"));
+  }
+
+  async function refreshInviteCodes() {
+    const response = await fetch("/api/invites");
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "邀请码读取失败");
+    const codes = Array.isArray(data.codes) ? data.codes.map((code) => String(code || "").trim()).filter(Boolean) : [];
+    setInviteCodes(codes);
+    return codes;
+  }
+
+  function submitAdminPassword(event) {
+    event?.preventDefault?.();
+    if (adminPasswordInput !== adminPassword) {
+      setAccessMessage("管理员密码错误");
+      return;
+    }
+    setAdminUnlocked(true);
+    setAccessMessage("");
+  }
+
+  function saveAdminSettings(event) {
+    event?.preventDefault?.();
+    const nextInvite = inviteDraft.trim();
+    if (!nextInvite) {
+      setAccessMessage("邀请码不能为空");
+      return;
+    }
+    void (async () => {
+      const nextCodes = [...new Set([nextInvite, ...inviteCodes])];
+      const response = await fetch("/api/invites", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ codes: nextCodes })
+      });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "邀请码保存失败");
+      setInviteCodes(Array.isArray(data.codes) ? data.codes.map((code) => String(code || "").trim()).filter(Boolean) : nextCodes);
+      setInviteDraft("");
+      setAccessMessage("邀请码已追加到文件");
+    })().catch((error) => setAccessMessage(error.message || "邀请码保存失败"));
   }
 
   function buildPlaybackQueue(track) {
@@ -1403,6 +1725,7 @@ function App() {
   useEffect(() => {
     refreshNeteaseState().catch(() => setNeteaseState({ loggedIn: false }));
     refreshQqMusicState().catch(() => setQqMusicState({ loggedIn: false }));
+    refreshInviteCodes().catch(() => setInviteCodes([]));
   }, []);
 
   useEffect(() => {
@@ -2047,15 +2370,17 @@ function App() {
         ...track,
         libraryKey: `global:${track.platform || track.sourcePlatform || "music"}:${track.id || track.url || index}:${index}`,
         playlistName: "全网搜索",
+        globalSearch: true,
+        globalSearchMode: modeMap[searchMode] || "song",
         qqSearchKey: track.qqSearchKey || keyword
       }));
       setGlobalTracks(items);
       setGlobalSearchStats(data.stats || []);
-      setViewMode("歌手");
+      setViewMode(searchMode === "歌手" ? "歌手" : "歌单");
       setSelectedTrack(null);
       setHoveredTrack(null);
       setPanelOpen(true);
-      flash(`全网聚合 ${items.length} 首，按歌手聚类`);
+      flash(searchMode === "歌手" ? `全网聚合 ${items.length} 首，按歌手聚类` : `全网找到 ${items.length} 首歌曲，点击星星播放`);
     } catch (error) {
       flash(error.message || "全网搜索失败");
     } finally {
@@ -2250,6 +2575,29 @@ function App() {
 
   return (
     <main className="app cloud-stage">
+      {!accessGranted ? (
+        <section className="invite-gate">
+          <div className="invite-card">
+            <div className="invite-brand">
+              <div className="title">{BRAND_CN} <span className="title-en">{BRAND_EN}</span></div>
+              <p>内测访问</p>
+            </div>
+            <form className="invite-form" onSubmit={submitInviteCode}>
+              <input
+                value={inviteInput}
+                onChange={(event) => setInviteInput(event.target.value)}
+                placeholder="请输入邀请码"
+                autoComplete="one-time-code"
+              />
+              <button type="submit">进入</button>
+            </form>
+            <div className="invite-actions">
+              <span>{accessMessage || "仅邀请码可使用"}</span>
+            </div>
+          </div>
+        </section>
+      ) : (
+      <>
       <div className="space-field" />
       {currentLyricLine?.text && (
         <div className="top-lyric" aria-live="polite">
@@ -2315,21 +2663,29 @@ function App() {
         </button>
         <span className="stat">{isLibraryLoading ? "同步曲库中" : `${playlistCount || 0} 歌单 · ${libraryTracks.length || 0} 首`}</span>
         <div className="login-actions">
-          {isNeteaseLoggedIn ? (
-            <div className="login-chip">
-              <span>{neteaseState?.profile?.nickname || neteaseState?.uid || "网易云已登录"}</span>
-              <button type="button" onClick={logoutNetease} aria-label="退出网易云">退出</button>
-            </div>
+          {isCompactControls ? (
+            <button className={`login-entry ${isLoggedIn ? "qq" : ""}`} onClick={() => openLoginPanel("qr")} type="button">
+              {accountLabel}
+            </button>
           ) : (
-            <button className="login-entry" onClick={() => openLoginPanel("qr")} type="button">网易云登录</button>
-          )}
-          {isQqMusicLoggedIn ? (
-            <div className="login-chip qq">
-              <span>{qqMusicState?.profile?.creator?.hostname || qqMusicState?.profile?.nick || qqMusicState?.uin || "QQ 音乐已登录"}</span>
-              <button type="button" onClick={logoutQqMusic} aria-label="退出 QQ 音乐">退出</button>
-            </div>
-          ) : (
-            <button className="login-entry qq" onClick={openQqMusicLoginPanel} type="button">QQ 音乐登录</button>
+            <>
+              {isNeteaseLoggedIn ? (
+                <div className="login-chip">
+                  <span>{neteaseState?.profile?.nickname || neteaseState?.uid || "网易云已登录"}</span>
+                  <button type="button" onClick={logoutNetease} aria-label="退出网易云">退出</button>
+                </div>
+              ) : (
+                <button className="login-entry" onClick={() => openLoginPanel("qr")} type="button">网易云登录</button>
+              )}
+              {isQqMusicLoggedIn ? (
+                <div className="login-chip qq">
+                  <span>{qqMusicState?.profile?.creator?.hostname || qqMusicState?.profile?.nick || qqMusicState?.uin || "QQ 音乐已登录"}</span>
+                  <button type="button" onClick={logoutQqMusic} aria-label="退出 QQ 音乐">退出</button>
+                </div>
+              ) : (
+                <button className="login-entry qq" onClick={openQqMusicLoginPanel} type="button">QQ 音乐登录</button>
+              )}
+            </>
           )}
         </div>
         <button className="ui-hide-btn" onClick={() => setUiHidden(true)} type="button">隐藏界面 · H</button>
@@ -2588,6 +2944,9 @@ function App() {
 
       <audio ref={audioRef} src={playerSource || undefined} preload="auto" />
       <audio ref={podcastAudioRef} preload="auto" />
+      </>
+      )}
+
     </main>
   );
 }
