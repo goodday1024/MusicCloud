@@ -39,7 +39,7 @@ Leave these empty unless you own valid keys. Resolvers without keys are skipped 
 
 - `BLOB_READ_WRITE_TOKEN`
 
-Create a Vercel Blob store for the project. Without Blob, generated podcast files are stored in `/tmp` and can disappear when the serverless function instance changes.
+Create a Vercel Blob store for the project. CaelumShao uses it for generated podcast files and persistent server-side state, including invite codes and CaelumShao account sessions. Without Blob on Vercel, these values fall back to the serverless `/tmp` filesystem and can disappear when the function instance changes.
 
 - `NETEASE_COOKIE`
 

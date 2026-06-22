@@ -17,7 +17,7 @@ import OpenAI from "openai";
 import NeteaseCloudMusicApi from "NeteaseCloudMusicApi";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import ffprobeInstaller from "@ffprobe-installer/ffprobe";
-import { put } from "@vercel/blob";
+import { get, put } from "@vercel/blob";
 
 const require = createRequire(import.meta.url);
 const qqMusicApi = require("qq-music-api");
@@ -57,6 +57,7 @@ const neteaseStateFile = path.join(dataDir, "netease.json");
 const qqMusicStateFile = path.join(dataDir, "qqmusic.json");
 const inviteCodesFile = path.join(dataDir, "invite-codes.json");
 const usersFile = path.join(dataDir, "users.json");
+const persistentJsonPrefix = process.env.AGENTIO_BLOB_STATE_PREFIX || "agentio/state";
 const qqMusicQrAppId = process.env.QQMUSIC_QR_APPID || "716027609";
 const qqMusicQrCallback = process.env.QQMUSIC_QR_CALLBACK || "https://y.qq.com/portal/profile.html";
 const qqMusicQrConfigs = [
@@ -530,6 +531,50 @@ function normalizeInviteCodes(codes = []) {
   return [...new Set((Array.isArray(codes) ? codes : []).map((item) => String(item || "").trim()).filter(Boolean))];
 }
 
+function shouldUsePersistentBlob() {
+  return Boolean(process.env.BLOB_READ_WRITE_TOKEN);
+}
+
+async function readPersistentJson(filePath, blobName, fallback) {
+  if (shouldUsePersistentBlob()) {
+    try {
+      const blob = await get(`${persistentJsonPrefix}/${blobName}`, { access: "private" });
+      const response = await fetch(blob.url);
+      if (!response.ok) throw new Error(`Blob read failed: ${response.status}`);
+      return JSON.parse(await response.text());
+    } catch (error) {
+      if (!/not found|404|BlobNotFound/i.test(error?.message || error?.name || "")) {
+        console.warn(`readPersistentJson blob failed for ${blobName}:`, error?.message || error);
+      }
+      if (existsSync(filePath)) {
+        try {
+          return JSON.parse(await readFile(filePath, "utf8"));
+        } catch (_localError) {
+          return fallback;
+        }
+      }
+      return fallback;
+    }
+  }
+  if (!existsSync(filePath)) return fallback;
+  return JSON.parse(await readFile(filePath, "utf8"));
+}
+
+async function writePersistentJson(filePath, blobName, payload) {
+  const text = JSON.stringify(payload, null, 2);
+  await writeFile(filePath, text, "utf8").catch((error) => {
+    console.warn(`writePersistentJson local failed for ${blobName}:`, error?.message || error);
+  });
+  if (shouldUsePersistentBlob()) {
+    await put(`${persistentJsonPrefix}/${blobName}`, text, {
+      access: "private",
+      contentType: "application/json",
+      addRandomSuffix: false,
+      allowOverwrite: true
+    });
+  }
+}
+
 function normalizeInviteEntry(entry = {}) {
   if (typeof entry === "string") {
     return { code: entry.trim(), createdAt: "", usedAt: "" };
@@ -542,10 +587,8 @@ function normalizeInviteEntry(entry = {}) {
 }
 
 async function readInviteCodes() {
-  if (!existsSync(inviteCodesFile)) return [];
   try {
-    const raw = await readFile(inviteCodesFile, "utf8");
-    const payload = JSON.parse(raw);
+    const payload = await readPersistentJson(inviteCodesFile, "invite-codes.json", { codes: [] });
     const entries = Array.isArray(payload)
       ? payload
       : Array.isArray(payload.codes)
@@ -568,7 +611,7 @@ async function saveInviteCodes(codes = []) {
     currentMap.set(code, { code, createdAt: new Date().toISOString(), usedAt: "" });
   }
   const merged = [...currentMap.values()];
-  await writeFile(inviteCodesFile, JSON.stringify({ updatedAt: new Date().toISOString(), codes: merged }, null, 2), "utf8");
+  await writePersistentJson(inviteCodesFile, "invite-codes.json", { updatedAt: new Date().toISOString(), codes: merged });
   return merged;
 }
 
@@ -588,7 +631,7 @@ async function consumeInviteCode(code = "", meta = {}) {
     userId: cleanText(meta.userId, 120),
     purpose: cleanText(meta.purpose || "device", 32)
   };
-  await writeFile(inviteCodesFile, JSON.stringify({ updatedAt: new Date().toISOString(), codes: entries }, null, 2), "utf8");
+  await writePersistentJson(inviteCodesFile, "invite-codes.json", { updatedAt: new Date().toISOString(), codes: entries });
   return { ok: true };
 }
 
@@ -662,9 +705,8 @@ function normalizeUsers(payload = {}) {
 }
 
 async function readUsers() {
-  if (!existsSync(usersFile)) return { users: [], sessions: {} };
   try {
-    return normalizeUsers(JSON.parse(await readFile(usersFile, "utf8")));
+    return normalizeUsers(await readPersistentJson(usersFile, "users.json", { users: [], sessions: {} }));
   } catch (error) {
     console.warn("readUsers failed, using empty list:", error.message);
     return { users: [], sessions: {} };
@@ -673,7 +715,7 @@ async function readUsers() {
 
 async function saveUsers(data) {
   const payload = normalizeUsers(data);
-  await writeFile(usersFile, JSON.stringify({ ...payload, updatedAt: new Date().toISOString() }, null, 2), "utf8");
+  await writePersistentJson(usersFile, "users.json", { ...payload, updatedAt: new Date().toISOString() });
   return payload;
 }
 
