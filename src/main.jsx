@@ -2568,7 +2568,13 @@ function App() {
   }
 
   async function runGlobalSearch() {
-    const keyword = query.trim() || "热门 华语 流行";
+    const keyword = query.trim();
+    if (!keyword) {
+      setGlobalTracks([]);
+      setGlobalSearchStats([]);
+      flash("请输入关键词后再进行全网搜索");
+      return;
+    }
     setGlobalSearching(true);
     setMessage("正在聚合全网歌曲");
     try {
@@ -2591,7 +2597,7 @@ function App() {
       setSelectedTrack(null);
       setHoveredTrack(null);
       setPanelOpen(true);
-      flash(searchMode === "歌手" ? `全网聚合 ${items.length} 首，按歌手聚类` : `全网找到 ${items.length} 首歌曲，点击星星播放`);
+      flash(items.length ? (searchMode === "歌手" ? `全网聚合 ${items.length} 首，按歌手聚类` : `全网找到 ${items.length} 首歌曲，点击星星播放`) : "全网没有找到匹配内容");
     } catch (error) {
       flash(error.message || "全网搜索失败");
     } finally {
@@ -2764,32 +2770,11 @@ function App() {
   }
 
   function captureRandomSong(point = {}) {
-    if (globalSearchEnabled && !globalTracks.length && !globalSearching) {
-      setGlobalSearching(true);
-      fetch(`/api/music/search-all?keyword=${encodeURIComponent("热门 华语 流行")}&count=${qualityMode === "high" ? 64 : 32}&mode=song`)
-        .then((response) => readJsonResponse(response).then((data) => ({ response, data })))
-        .then(({ response, data }) => {
-          if (!response.ok) throw new Error(data.error || "全网随机失败");
-          const items = (data.items || []).map((track, index) => ({
-            ...track,
-            libraryKey: `global:random:${track.platform || track.sourcePlatform || "music"}:${track.id || track.url || index}:${index}`,
-            playlistName: "全网随机",
-            globalSearch: true,
-            globalSearchMode: "song"
-          }));
-          setGlobalTracks(items);
-          setGlobalSearchStats(data.stats || []);
-          setGlobalSearching(false);
-          window.setTimeout(() => captureRandomSong(point), 80);
-        })
-        .catch((error) => {
-          setGlobalSearching(false);
-          flash(error.message || "全网随机失败");
-        });
-      flash("正在聚合全网随机星点");
+    if (globalSearchEnabled && !globalTracks.length) {
+      flash("全网模式需要先输入关键词搜索到内容，才能随机捕捉");
       return;
     }
-    const source = (sphereTracks.length ? sphereTracks : [...libraryTracks, ...Object.values(savedTrackItems)])
+    const source = (globalSearchEnabled ? globalTracks : (sphereTracks.length ? sphereTracks : [...libraryTracks, ...Object.values(savedTrackItems)]))
       .filter((track) => track && !track.artistCenter && !track.placeholder);
     if (!source.length) {
       flash("还没有可捕捉的歌曲");
