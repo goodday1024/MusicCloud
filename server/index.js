@@ -56,6 +56,7 @@ const neteaseApiBaseUrl = process.env.NETEASE_API_BASE_URL?.replace(/\/$/, "") |
 const neteaseStateFile = path.join(dataDir, "netease.json");
 const qqMusicStateFile = path.join(dataDir, "qqmusic.json");
 const inviteCodesFile = path.join(dataDir, "invite-codes.json");
+const usersFile = path.join(dataDir, "users.json");
 const qqMusicQrAppId = process.env.QQMUSIC_QR_APPID || "716027609";
 const qqMusicQrCallback = process.env.QQMUSIC_QR_CALLBACK || "https://y.qq.com/portal/profile.html";
 const qqMusicQrConfigs = [
@@ -571,13 +572,22 @@ async function saveInviteCodes(codes = []) {
   return merged;
 }
 
-async function consumeInviteCode(code = "") {
+async function consumeInviteCode(code = "", meta = {}) {
   const target = String(code || "").trim();
   if (!target) return { ok: false, reason: "empty" };
   const entries = await readInviteCodes();
+  const deviceId = cleanText(meta.deviceId, 120);
+  const existing = entries.find((entry) => entry.code === target && entry.usedAt && entry.deviceId && entry.deviceId === deviceId);
+  if (existing) return { ok: true, reused: true };
   const index = entries.findIndex((entry) => entry.code === target && !entry.usedAt);
   if (index === -1) return { ok: false, reason: "not_found" };
-  entries[index] = { ...entries[index], usedAt: new Date().toISOString() };
+  entries[index] = {
+    ...entries[index],
+    usedAt: new Date().toISOString(),
+    deviceId,
+    userId: cleanText(meta.userId, 120),
+    purpose: cleanText(meta.purpose || "device", 32)
+  };
   await writeFile(inviteCodesFile, JSON.stringify({ updatedAt: new Date().toISOString(), codes: entries }, null, 2), "utf8");
   return { ok: true };
 }
@@ -585,6 +595,135 @@ async function consumeInviteCode(code = "") {
 async function listUnusedInviteCodes() {
   const entries = await readInviteCodes();
   return entries.filter((entry) => !entry.usedAt).map((entry) => entry.code);
+}
+
+async function fetchNeteaseLibraryTracks(req) {
+  const playlists = await fetchNeteasePlaylists(req);
+  const activePlaylists = playlists.slice(0, maxLibraryPlaylists);
+  const groups = await mapWithConcurrency(
+    activePlaylists,
+    libraryPlaylistConcurrency,
+    async (playlist) => {
+      const tracks = await fetchNeteasePlaylistTracks(playlist.id, req).catch(() => []);
+      return tracks.slice(0, maxLibraryTracksPerPlaylist).map((track, index) => ({
+        ...track,
+        cover: track.cover || playlist.cover || "",
+        libraryKey: `netease:${playlist.id}:${track.id || index}:${index}`,
+        playlistId: playlist.id,
+        playlistName: playlist.name,
+        playlistDescription: playlist.description || ""
+      }));
+    }
+  );
+  return groups.flat();
+}
+
+async function fetchQQMusicLibraryTracks(req) {
+  const playlists = await fetchQQMusicPlaylists(req);
+  const activePlaylists = playlists.slice(0, maxLibraryPlaylists);
+  const groups = await mapWithConcurrency(
+    activePlaylists,
+    libraryPlaylistConcurrency,
+    async (playlist) => {
+      const tracks = await fetchQQMusicPlaylistTracks(playlist.id, req).catch(() => []);
+      return tracks.slice(0, maxLibraryTracksPerPlaylist).map((track, index) => ({
+        ...track,
+        cover: track.cover || playlist.cover || "",
+        libraryKey: `qq:${playlist.id}:${track.id || track.songId || index}:${index}`,
+        playlistId: playlist.id,
+        playlistName: playlist.name,
+        playlistDescription: playlist.description || ""
+      }));
+    }
+  );
+  return groups.flat();
+}
+
+function hashPassword(password = "", salt = crypto.randomBytes(16).toString("hex")) {
+  const hash = crypto.pbkdf2Sync(String(password), salt, 120000, 32, "sha256").toString("hex");
+  return { salt, hash };
+}
+
+function verifyPassword(password = "", user = {}) {
+  if (!user.passwordSalt || !user.passwordHash) return false;
+  const { hash } = hashPassword(password, user.passwordSalt);
+  return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(user.passwordHash));
+}
+
+function authToken() {
+  return crypto.randomBytes(28).toString("base64url");
+}
+
+function normalizeUsers(payload = {}) {
+  return {
+    users: Array.isArray(payload.users) ? payload.users : [],
+    sessions: payload.sessions && typeof payload.sessions === "object" ? payload.sessions : {}
+  };
+}
+
+async function readUsers() {
+  if (!existsSync(usersFile)) return { users: [], sessions: {} };
+  try {
+    return normalizeUsers(JSON.parse(await readFile(usersFile, "utf8")));
+  } catch (error) {
+    console.warn("readUsers failed, using empty list:", error.message);
+    return { users: [], sessions: {} };
+  }
+}
+
+async function saveUsers(data) {
+  const payload = normalizeUsers(data);
+  await writeFile(usersFile, JSON.stringify({ ...payload, updatedAt: new Date().toISOString() }, null, 2), "utf8");
+  return payload;
+}
+
+function publicUser(user = {}) {
+  return {
+    id: user.id,
+    username: user.username,
+    createdAt: user.createdAt || "",
+    bound: {
+      netease: Boolean(user.bindings?.netease?.loggedIn),
+      qq: Boolean(user.bindings?.qq?.loggedIn)
+    },
+    historyCount: Array.isArray(user.history) ? user.history.length : 0,
+    savedCount: Array.isArray(user.savedTracks) ? user.savedTracks.length : 0,
+    lastSyncedAt: user.lastSyncedAt || ""
+  };
+}
+
+function tokenFromRequest(req) {
+  const header = String(req.headers.authorization || "");
+  if (header.toLowerCase().startsWith("bearer ")) return header.slice(7).trim();
+  return String(req.headers["x-caelum-token"] || "").trim();
+}
+
+async function getUserByToken(req) {
+  const token = tokenFromRequest(req);
+  if (!token) return { data: await readUsers(), user: null, token: "" };
+  const data = await readUsers();
+  const userId = data.sessions[token];
+  const user = data.users.find((item) => item.id === userId) || null;
+  return { data, user, token };
+}
+
+function compactHistoryTrack(track = {}) {
+  return {
+    key: trackKeyForServer(track),
+    id: track.id || "",
+    title: cleanText(track.title, 120),
+    artist: cleanText(track.artist, 120),
+    album: cleanText(track.album, 120),
+    cover: cleanText(track.cover, 500),
+    platform: cleanText(track.platform || track.sourcePlatform, 32),
+    playlistName: cleanText(track.playlistName, 120),
+    musicUrl: cleanText(track.musicUrl, 800),
+    playedAt: new Date().toISOString()
+  };
+}
+
+function trackKeyForServer(track = {}) {
+  return String(track.libraryKey || track.id || track.songId || track.mediaId || `${track.platform || ""}:${track.title || ""}:${track.artist || ""}`).slice(0, 240);
 }
 
 function cookieHeaderFromState(state) {
@@ -4152,12 +4291,176 @@ app.post("/api/invites/consume", async (req, res, next) => {
       res.status(400).json({ error: "缺少邀请码" });
       return;
     }
-    const result = await consumeInviteCode(code);
+    const result = await consumeInviteCode(code, { deviceId: req.body?.deviceId, purpose: "device" });
     if (!result.ok) {
       res.status(404).json({ error: "邀请码不存在或已使用" });
       return;
     }
     res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/account/register", async (req, res, next) => {
+  try {
+    const username = cleanText(req.body?.username, 64).toLowerCase();
+    const password = String(req.body?.password || "");
+    const inviteCode = String(req.body?.inviteCode || "").trim();
+    if (!/^[a-z0-9_@.-]{3,64}$/i.test(username)) {
+      res.status(400).json({ error: "用户名至少 3 位，只能包含字母、数字、下划线、点、横线或邮箱符号" });
+      return;
+    }
+    if (password.length < 6) {
+      res.status(400).json({ error: "密码至少 6 位" });
+      return;
+    }
+    const data = await readUsers();
+    if (data.users.some((user) => user.username === username)) {
+      res.status(409).json({ error: "该云韶账号已存在" });
+      return;
+    }
+    const consumed = await consumeInviteCode(inviteCode, { purpose: "account", userId: username, deviceId: req.body?.deviceId });
+    if (!consumed.ok) {
+      res.status(404).json({ error: "邀请码不存在或已使用" });
+      return;
+    }
+    const passwordRecord = hashPassword(password);
+    const user = {
+      id: nanoid(12),
+      username,
+      passwordSalt: passwordRecord.salt,
+      passwordHash: passwordRecord.hash,
+      createdAt: new Date().toISOString(),
+      activatedBy: inviteCode,
+      bindings: {},
+      savedTracks: [],
+      history: [],
+      syncedTracks: [],
+      lastSyncedAt: ""
+    };
+    const token = authToken();
+    data.users.push(user);
+    data.sessions[token] = user.id;
+    await saveUsers(data);
+    res.json({ token, user: publicUser(user), savedTracks: [], history: [] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/account/login", async (req, res, next) => {
+  try {
+    const username = cleanText(req.body?.username, 64).toLowerCase();
+    const password = String(req.body?.password || "");
+    const data = await readUsers();
+    const user = data.users.find((item) => item.username === username);
+    if (!user || !verifyPassword(password, user)) {
+      res.status(401).json({ error: "账号或密码不正确" });
+      return;
+    }
+    const token = authToken();
+    data.sessions[token] = user.id;
+    await saveUsers(data);
+    res.json({ token, user: publicUser(user), savedTracks: user.savedTracks || [], history: user.history || [] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/account/me", async (req, res, next) => {
+  try {
+    const { user } = await getUserByToken(req);
+    if (!user) {
+      res.status(401).json({ error: "未登录云韶账号" });
+      return;
+    }
+    res.json({ user: publicUser(user), savedTracks: user.savedTracks || [], history: user.history || [], syncedTracks: user.syncedTracks || [] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/account/logout", async (req, res, next) => {
+  try {
+    const token = tokenFromRequest(req);
+    const data = await readUsers();
+    if (token) delete data.sessions[token];
+    await saveUsers(data);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/account/bind-current", async (req, res, next) => {
+  try {
+    const { data, user } = await getUserByToken(req);
+    if (!user) {
+      res.status(401).json({ error: "请先登录云韶账号" });
+      return;
+    }
+    const netease = await readNeteaseState(req).catch(() => null);
+    const qq = await readQQMusicState(req).catch(() => null);
+    user.bindings = {
+      ...user.bindings,
+      netease: netease?.loggedIn ? serializeNeteaseState(netease) : user.bindings?.netease || null,
+      qq: qq?.loggedIn ? serializeQQMusicState(qq) : user.bindings?.qq || null
+    };
+    await saveUsers(data);
+    res.json({ user: publicUser(user) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/account/sync-library", async (req, res, next) => {
+  try {
+    const { data, user } = await getUserByToken(req);
+    if (!user) {
+      res.status(401).json({ error: "请先登录云韶账号" });
+      return;
+    }
+    const [netease, qq] = await Promise.all([
+      fetchNeteaseLibraryTracks(req).catch(() => []),
+      fetchQQMusicLibraryTracks(req).catch(() => [])
+    ]);
+    user.syncedTracks = [...netease, ...qq].slice(0, 2000);
+    user.lastSyncedAt = new Date().toISOString();
+    await saveUsers(data);
+    res.json({ user: publicUser(user), items: user.syncedTracks });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/account/history", async (req, res, next) => {
+  try {
+    const { data, user } = await getUserByToken(req);
+    if (!user) {
+      res.status(401).json({ error: "请先登录云韶账号" });
+      return;
+    }
+    const track = compactHistoryTrack(req.body?.track || {});
+    user.history = [track, ...(user.history || []).filter((item) => item.key !== track.key)].slice(0, 500);
+    await saveUsers(data);
+    res.json({ history: user.history });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/account/saved", async (req, res, next) => {
+  try {
+    const { data, user } = await getUserByToken(req);
+    if (!user) {
+      res.status(401).json({ error: "请先登录云韶账号" });
+      return;
+    }
+    const savedTracks = Array.isArray(req.body?.savedTracks) ? req.body.savedTracks : [];
+    user.savedTracks = savedTracks.slice(0, 500).map((track) => ({ ...compactHistoryTrack(track), savedAt: track.savedAt || new Date().toISOString() }));
+    await saveUsers(data);
+    res.json({ savedTracks: user.savedTracks });
   } catch (error) {
     next(error);
   }

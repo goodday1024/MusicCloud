@@ -13,14 +13,18 @@ const PODCAST_CACHE_KEY = "caelumshao.podcastCache.v1";
 const PODCAST_CACHE_TTL = 24 * 60 * 60 * 1000;
 const ADMIN_PASSWORD_KEY = "caelumshao.adminPassword.v1";
 const ACCESS_GRANTED_KEY = "caelumshao.accessGranted.v1";
+const ACCESS_MODE_KEY = "caelumshao.accessMode.v1";
+const ACTIVATED_INVITE_KEY = "caelumshao.activatedInvite.v1";
+const ACCOUNT_TOKEN_KEY = "caelumshao.accountToken.v1";
+const DEVICE_ID_KEY = "caelumshao.deviceId.v1";
 const DEFAULT_ADMIN_PASSWORD = "admin123456";
 const RENDER_LIMITS = {
-  low: { tracks: 520, dust: 7600, mist: 900 },
-  high: { tracks: 2400, dust: 52000, mist: 7800 }
+  low: { tracks: 360, dust: 3200, mist: 360 },
+  high: { tracks: 1200, dust: 18000, mist: 2400 }
 };
 const GLOBAL_RENDER_LIMITS = {
-  low: { tracks: 900, dust: 12000, mist: 1300 },
-  high: { tracks: 3800, dust: 76000, mist: 9800 }
+  low: { tracks: 520, dust: 4600, mist: 480 },
+  high: { tracks: 1800, dust: 24000, mist: 3200 }
 };
 
 function trackKey(track) {
@@ -142,6 +146,25 @@ function readAccessGranted() {
   } catch (_error) {
     return false;
   }
+}
+
+function readDeviceId() {
+  try {
+    const current = localStorage.getItem(DEVICE_ID_KEY);
+    if (current) return current;
+    const next = `dev-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
+    localStorage.setItem(DEVICE_ID_KEY, next);
+    return next;
+  } catch (_error) {
+    return `dev-${Date.now().toString(36)}`;
+  }
+}
+
+function defaultQualityMode() {
+  if (typeof window === "undefined") return "low";
+  const coarse = window.matchMedia?.("(pointer: coarse)")?.matches || false;
+  const narrow = window.matchMedia?.("(max-width: 760px)")?.matches || false;
+  return coarse || narrow ? "low" : "high";
 }
 
 function randomInviteCode(length = 10) {
@@ -452,7 +475,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     camera.position.set(0, 0, 6);
 
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.35));
     renderer.setClearColor(0x000000, 0);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -1095,6 +1118,10 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     };
 
     const animate = () => {
+      if (document.hidden) {
+        raf = window.requestAnimationFrame(animate);
+        return;
+      }
       const closeFocus = jumpingRef.current || deepFocusRef.current;
       const panSpeed = closeFocus ? 0.026 : 0.018;
       const depthSpeed = closeFocus ? 0.048 : 0.036;
@@ -1237,6 +1264,8 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
 function App() {
   const isAdminRoute = normalizePath(window.location.pathname) === "/admin";
   const [accessGranted, setAccessGranted] = useState(() => readAccessGranted());
+  const [accessMode, setAccessMode] = useState(() => localStorage.getItem(ACCESS_MODE_KEY) || "");
+  const [activatedInvite, setActivatedInvite] = useState(() => localStorage.getItem(ACTIVATED_INVITE_KEY) || "");
   const [inviteInput, setInviteInput] = useState("");
   const [accessMessage, setAccessMessage] = useState("");
   const [adminUnlocked, setAdminUnlocked] = useState(false);
@@ -1245,6 +1274,13 @@ function App() {
   const [inviteCodes, setInviteCodes] = useState([]);
   const [inviteDraft, setInviteDraft] = useState("");
   const [batchInviteCount, setBatchInviteCount] = useState(10);
+  const [deviceId] = useState(() => readDeviceId());
+  const [accountToken, setAccountToken] = useState(() => localStorage.getItem(ACCOUNT_TOKEN_KEY) || "");
+  const [cloudUser, setCloudUser] = useState(null);
+  const [accountMode, setAccountMode] = useState("login");
+  const [accountUsername, setAccountUsername] = useState("");
+  const [accountPassword, setAccountPassword] = useState("");
+  const [accountInvite, setAccountInvite] = useState("");
   const [neteaseState, setNeteaseState] = useState(null);
   const [qqMusicState, setQqMusicState] = useState(null);
   const [libraryCacheMeta, setLibraryCacheMeta] = useState(() => readLibraryCache());
@@ -1268,13 +1304,14 @@ function App() {
   const [searchMode, setSearchMode] = useState("歌曲");
   const [query, setQuery] = useState("");
   const [globalSearchEnabled, setGlobalSearchEnabled] = useState(false);
-  const [qualityMode, setQualityMode] = useState("high");
+  const [qualityMode, setQualityMode] = useState(() => defaultQualityMode());
   const [globalTracks, setGlobalTracks] = useState([]);
   const [globalSearching, setGlobalSearching] = useState(false);
   const [globalSearchStats, setGlobalSearchStats] = useState([]);
   const [uiHidden, setUiHidden] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [podcastEnabled, setPodcastEnabled] = useState(() => localStorage.getItem(PODCAST_ENABLED_KEY) !== "false");
+  const [singleLoop, setSingleLoop] = useState(false);
   const [isCompactControls, setIsCompactControls] = useState(false);
   const [panelOpen, setPanelOpen] = useState(true);
   const [savedKeys, setSavedKeys] = useState(() => {
@@ -1302,6 +1339,7 @@ function App() {
   const [loginMode, setLoginMode] = useState("qr");
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginMessage, setLoginMessage] = useState("");
+  const [bindingMusicAccount, setBindingMusicAccount] = useState(false);
   const [phone, setPhone] = useState("");
   const [captcha, setCaptcha] = useState("");
   const [qqCookie, setQqCookie] = useState("");
@@ -1510,6 +1548,16 @@ function App() {
   }, [accessGranted]);
 
   useEffect(() => {
+    if (accessMode) localStorage.setItem(ACCESS_MODE_KEY, accessMode);
+    else localStorage.removeItem(ACCESS_MODE_KEY);
+  }, [accessMode]);
+
+  useEffect(() => {
+    if (activatedInvite) localStorage.setItem(ACTIVATED_INVITE_KEY, activatedInvite);
+    else localStorage.removeItem(ACTIVATED_INVITE_KEY);
+  }, [activatedInvite]);
+
+  useEffect(() => {
     localStorage.setItem(ADMIN_PASSWORD_KEY, adminPassword);
   }, [adminPassword]);
 
@@ -1554,15 +1602,171 @@ function App() {
       const response = await fetch("/api/invites/consume", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: trimmed })
+        body: JSON.stringify({ code: trimmed, deviceId })
       });
       const data = await readJsonResponse(response);
       if (!response.ok) throw new Error(data.error || "邀请码不正确或已使用");
       setAccessGranted(true);
+      setAccessMode("invite");
+      setActivatedInvite(trimmed);
       setAccessMessage("邀请码已通过");
       setInviteInput("");
       await refreshInviteCodes().catch(() => null);
     })().catch((error) => setAccessMessage(error.message || "邀请码不正确或已使用"));
+  }
+
+  function accountHeaders() {
+    return accountToken ? { Authorization: `Bearer ${accountToken}` } : {};
+  }
+
+  function applyAccountPayload(data = {}) {
+    if (data.token) {
+      localStorage.setItem(ACCOUNT_TOKEN_KEY, data.token);
+      setAccountToken(data.token);
+    }
+    if (data.user) {
+      setCloudUser(data.user);
+      setAccessGranted(true);
+      setAccessMode("account");
+      localStorage.setItem(ACCESS_GRANTED_KEY, "true");
+    }
+    if (Array.isArray(data.savedTracks)) {
+      const nextItems = Object.fromEntries(data.savedTracks.map((track) => [track.key || trackKey(track), track]));
+      setSavedTrackItems(nextItems);
+      setSavedKeys(new Set(Object.keys(nextItems)));
+      localStorage.setItem("agentio.savedTrackItems", JSON.stringify(nextItems));
+      localStorage.setItem("agentio.savedTracks", JSON.stringify(Object.keys(nextItems)));
+    }
+  }
+
+  async function submitCloudAccount(event) {
+    event?.preventDefault?.();
+    const endpoint = accountMode === "register" ? "/api/account/register" : "/api/account/login";
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: accountUsername,
+          password: accountPassword,
+          inviteCode: accountMode === "register" ? (accountInvite.trim() || activatedInvite) : accountInvite,
+          deviceId
+        })
+      });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "云韶账号请求失败");
+      applyAccountPayload(data);
+      setAccountPassword("");
+      setAccountInvite("");
+      setAccessMessage(accountMode === "register" ? "云韶账号已注册并激活" : "云韶账号已登录");
+    } catch (error) {
+      setAccessMessage(error.message || "云韶账号请求失败");
+    }
+  }
+
+  async function refreshCloudAccount() {
+    if (!accountToken) return;
+    try {
+      const response = await fetch("/api/account/me", { headers: accountHeaders() });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "云韶账号已失效");
+      applyAccountPayload(data);
+    } catch (_error) {
+      localStorage.removeItem(ACCOUNT_TOKEN_KEY);
+      setAccountToken("");
+      setCloudUser(null);
+      if (accessMode === "account") {
+        setAccessGranted(false);
+        setAccessMode("");
+        setActivatedInvite("");
+        setAccessMessage("云韶账号登录已失效，请重新登录");
+      }
+    }
+  }
+
+  async function bindCurrentMusicAccounts() {
+    if (!accountToken) {
+      flash("请先登录云韶账号");
+      return;
+    }
+    setBindingMusicAccount(true);
+    setSettingsOpen(false);
+    setLoginOpen(true);
+    setLoginProvider("netease");
+    setLoginMode("qr");
+    setLoginMessage("请选择要重新绑定或新绑定的音乐平台");
+  }
+
+  async function finishMusicAccountBinding() {
+    if (!accountToken || !bindingMusicAccount) return;
+    try {
+      const response = await fetch("/api/account/bind-current", { method: "POST", headers: accountHeaders() });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "绑定失败");
+      setCloudUser(data.user || null);
+      setBindingMusicAccount(false);
+      flash("音乐账号已绑定到云韶账号");
+    } catch (error) {
+      flash(error.message || "绑定失败");
+    }
+  }
+
+  async function syncCloudLibrary() {
+    if (!accountToken) {
+      flash("请先登录云韶账号");
+      return;
+    }
+    try {
+      setIsLibraryLoading(true);
+      const response = await fetch("/api/account/sync-library", { method: "POST", headers: accountHeaders() });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "同步失败");
+      setCloudUser(data.user || cloudUser);
+      if (Array.isArray(data.items) && data.items.length) {
+        setLibraryTracks(data.items);
+        setLibraryCacheMeta(writeLibraryCache(data.items));
+      }
+      flash(`云韶账号已同步 ${data.items?.length || 0} 首`);
+    } catch (error) {
+      flash(error.message || "同步失败");
+    } finally {
+      setIsLibraryLoading(false);
+    }
+  }
+
+  function syncPlayHistory(track) {
+    if (!accountToken || !track) return;
+    fetch("/api/account/history", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...accountHeaders() },
+      body: JSON.stringify({ track })
+    }).catch(() => null);
+  }
+
+  function syncSavedTracks(nextItems) {
+    if (!accountToken) return;
+    fetch("/api/account/saved", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...accountHeaders() },
+      body: JSON.stringify({ savedTracks: Object.values(nextItems || {}) })
+    }).catch(() => null);
+  }
+
+  function logoutCloudAccount() {
+    fetch("/api/account/logout", { method: "POST", headers: accountHeaders() }).catch(() => null);
+    localStorage.removeItem(ACCOUNT_TOKEN_KEY);
+    setAccountToken("");
+    setCloudUser(null);
+    if (accessMode === "account") {
+      setAccessGranted(false);
+      setAccessMode("");
+      setActivatedInvite("");
+      setSettingsOpen(false);
+      setAccessMessage("已退出云韶账号，请重新激活或登录");
+    } else {
+      setAccessMode("invite");
+      flash("已退出云韶账号，当前设备激活仍有效");
+    }
   }
 
   async function refreshInviteCodes() {
@@ -1726,6 +1930,7 @@ function App() {
     refreshNeteaseState().catch(() => setNeteaseState({ loggedIn: false }));
     refreshQqMusicState().catch(() => setQqMusicState({ loggedIn: false }));
     refreshInviteCodes().catch(() => setInviteCodes([]));
+    refreshCloudAccount();
   }, []);
 
   useEffect(() => {
@@ -1770,10 +1975,11 @@ function App() {
         const data = await readJsonResponse(response);
         if (!response.ok) throw new Error(data.error || "二维码状态检查失败");
         if (data.loggedIn || data.code === 803 || data.code === 200) {
-          setLoginMessage("登录成功，正在同步歌单");
+          setLoginMessage(bindingMusicAccount ? "登录成功，正在绑定到云韶账号" : "登录成功，正在同步歌单");
           setLoginOpen(false);
           setNeteaseState(data);
           await loadAllLibraries().catch(() => null);
+          await finishMusicAccountBinding();
         } else if (data.qrStatus || data.payload?.message) {
           setLoginMessage(data.qrStatus || data.payload?.message);
         }
@@ -1782,7 +1988,7 @@ function App() {
       }
     }, 1800);
     return () => window.clearInterval(timer);
-  }, [isLoggedIn, loginMode, loginOpen, neteaseState?.qrKey]);
+  }, [bindingMusicAccount, isLoggedIn, loginMode, loginOpen, neteaseState?.qrKey]);
 
   useEffect(() => {
     if (!loginOpen || loginProvider !== "qq" || !isQqQrLoginMode(loginMode) || !qqMusicState?.qrSig || isQqMusicLoggedIn) return undefined;
@@ -1799,9 +2005,10 @@ function App() {
         if (!response.ok) throw new Error(data.error || "QQ 音乐二维码状态检查失败");
         setQqMusicState(data);
         if (data.loggedIn && !data.needCookieImport) {
-          setLoginMessage("QQ 音乐登录成功，正在同步歌单");
+          setLoginMessage(bindingMusicAccount ? "QQ 音乐登录成功，正在绑定到云韶账号" : "QQ 音乐登录成功，正在同步歌单");
           setLoginOpen(false);
           await loadAllLibraries().catch(() => null);
+          await finishMusicAccountBinding();
         } else if (data.qrAlternative === "wx") {
           setLoginMode("qq-wx-qr");
           setQqMusicState((state) => (state ? { ...state, qrSig: "", qrImg: "", qrStatus: data.qrStatus || "", qrLoginType: "wx" } : data));
@@ -1823,7 +2030,7 @@ function App() {
       }
     }, 1800);
     return () => window.clearInterval(timer);
-  }, [isQqMusicLoggedIn, loginMode, loginOpen, loginProvider, qqMusicState?.qrLoginType, qqMusicState?.qrSig]);
+  }, [bindingMusicAccount, isQqMusicLoggedIn, loginMode, loginOpen, loginProvider, qqMusicState?.qrLoginType, qqMusicState?.qrSig]);
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -1849,6 +2056,11 @@ function App() {
     const onPause = () => setIsPlaying(false);
     const onMeta = () => setAudioDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
     const onEnded = () => {
+      if (singleLoop) {
+        audio.currentTime = 0;
+        audio.play().catch(() => null);
+        return;
+      }
       if (!isLoggedIn) {
         setIsPlaying(false);
         setMessage("播放完成");
@@ -1877,7 +2089,7 @@ function App() {
       audio.removeEventListener("durationchange", onMeta);
       audio.removeEventListener("ended", onEnded);
     };
-  }, [isLoggedIn, playerSource]);
+  }, [isLoggedIn, playerSource, singleLoop]);
 
   useEffect(() => {
     let raf = 0;
@@ -2061,6 +2273,7 @@ function App() {
         queue[index] = { ...track, musicUrl: originalUrl };
         queueRef.current = [...queue];
         setTrackQueue([...queue]);
+        syncPlayHistory({ ...track, musicUrl: originalUrl });
         void loadLyricsForTrack(track, token);
         void prefetchQueueTrack(index + 1);
         window.setTimeout(() => {
@@ -2185,8 +2398,9 @@ function App() {
       setNeteaseState(nextState);
       setLoginOpen(false);
       setLoginMessage("");
-      flash("网易云登录成功，正在同步歌单");
+      flash(bindingMusicAccount ? "网易云登录成功，正在绑定到云韶账号" : "网易云登录成功，正在同步歌单");
       await loadAllLibraries().catch(() => null);
+      await finishMusicAccountBinding();
     } catch (error) {
       setLoginMessage(error.message || "手机号登录失败");
     } finally {
@@ -2283,8 +2497,9 @@ function App() {
       setQqMusicState(data);
       setQqCookie("");
       setLoginOpen(false);
-      flash("QQ 音乐登录成功，正在同步歌单");
+      flash(bindingMusicAccount ? "QQ 音乐登录成功，正在绑定到云韶账号" : "QQ 音乐登录成功，正在同步歌单");
       await loadAllLibraries().catch(() => null);
+      await finishMusicAccountBinding();
     } catch (error) {
       setLoginMessage(error.message || "QQ 音乐登录失败");
     } finally {
@@ -2353,11 +2568,7 @@ function App() {
   }
 
   async function runGlobalSearch() {
-    const keyword = query.trim();
-    if (!keyword) {
-      flash("请输入全网搜索关键词");
-      return;
-    }
+    const keyword = query.trim() || "热门 华语 流行";
     setGlobalSearching(true);
     setMessage("正在聚合全网歌曲");
     try {
@@ -2549,9 +2760,35 @@ function App() {
     setSavedTrackItems(nextItems);
     localStorage.setItem("agentio.savedTracks", JSON.stringify([...next]));
     localStorage.setItem("agentio.savedTrackItems", JSON.stringify(nextItems));
+    syncSavedTracks(nextItems);
   }
 
   function captureRandomSong(point = {}) {
+    if (globalSearchEnabled && !globalTracks.length && !globalSearching) {
+      setGlobalSearching(true);
+      fetch(`/api/music/search-all?keyword=${encodeURIComponent("热门 华语 流行")}&count=${qualityMode === "high" ? 64 : 32}&mode=song`)
+        .then((response) => readJsonResponse(response).then((data) => ({ response, data })))
+        .then(({ response, data }) => {
+          if (!response.ok) throw new Error(data.error || "全网随机失败");
+          const items = (data.items || []).map((track, index) => ({
+            ...track,
+            libraryKey: `global:random:${track.platform || track.sourcePlatform || "music"}:${track.id || track.url || index}:${index}`,
+            playlistName: "全网随机",
+            globalSearch: true,
+            globalSearchMode: "song"
+          }));
+          setGlobalTracks(items);
+          setGlobalSearchStats(data.stats || []);
+          setGlobalSearching(false);
+          window.setTimeout(() => captureRandomSong(point), 80);
+        })
+        .catch((error) => {
+          setGlobalSearching(false);
+          flash(error.message || "全网随机失败");
+        });
+      flash("正在聚合全网随机星点");
+      return;
+    }
     const source = (sphereTracks.length ? sphereTracks : [...libraryTracks, ...Object.values(savedTrackItems)])
       .filter((track) => track && !track.artistCenter && !track.placeholder);
     if (!source.length) {
@@ -2594,6 +2831,19 @@ function App() {
             <div className="invite-actions">
               <span>{accessMessage || "仅邀请码可使用"}</span>
             </div>
+            <form className="account-form" onSubmit={submitCloudAccount}>
+              <div className="account-tabs">
+                <button type="button" className={accountMode === "login" ? "on" : ""} onClick={() => setAccountMode("login")}>云韶登录</button>
+                <button type="button" className={accountMode === "register" ? "on" : ""} onClick={() => setAccountMode("register")}>注册激活</button>
+              </div>
+            <input value={accountUsername} onChange={(event) => setAccountUsername(event.target.value)} placeholder="云韶账号 / 邮箱" autoComplete="username" />
+            <input value={accountPassword} onChange={(event) => setAccountPassword(event.target.value)} placeholder="密码" type="password" autoComplete={accountMode === "register" ? "new-password" : "current-password"} />
+            {accountMode === "register" && (
+                <input value={accountInvite} onChange={(event) => setAccountInvite(event.target.value)} placeholder={activatedInvite ? "默认使用当前已激活的邀请码" : "注册邀请码"} autoComplete="one-time-code" />
+            )}
+              <button type="submit">{accountMode === "register" ? "注册并进入" : "登录云韶账号"}</button>
+              <small>注册后可跨设备同步拾遗和最近播放；不注册时，邀请码只授权当前设备。</small>
+            </form>
           </div>
         </section>
       ) : (
@@ -2661,33 +2911,8 @@ function App() {
         <button className={`filter settings-trigger ${settingsOpen ? "on" : ""}`} type="button" onClick={() => setSettingsOpen((value) => !value)}>
           设置
         </button>
+        {cloudUser && <span className="stat">云韶 · {cloudUser.username}</span>}
         <span className="stat">{isLibraryLoading ? "同步曲库中" : `${playlistCount || 0} 歌单 · ${libraryTracks.length || 0} 首`}</span>
-        <div className="login-actions">
-          {isCompactControls ? (
-            <button className={`login-entry ${isLoggedIn ? "qq" : ""}`} onClick={() => openLoginPanel("qr")} type="button">
-              {accountLabel}
-            </button>
-          ) : (
-            <>
-              {isNeteaseLoggedIn ? (
-                <div className="login-chip">
-                  <span>{neteaseState?.profile?.nickname || neteaseState?.uid || "网易云已登录"}</span>
-                  <button type="button" onClick={logoutNetease} aria-label="退出网易云">退出</button>
-                </div>
-              ) : (
-                <button className="login-entry" onClick={() => openLoginPanel("qr")} type="button">网易云登录</button>
-              )}
-              {isQqMusicLoggedIn ? (
-                <div className="login-chip qq">
-                  <span>{qqMusicState?.profile?.creator?.hostname || qqMusicState?.profile?.nick || qqMusicState?.uin || "QQ 音乐已登录"}</span>
-                  <button type="button" onClick={logoutQqMusic} aria-label="退出 QQ 音乐">退出</button>
-                </div>
-              ) : (
-                <button className="login-entry qq" onClick={openQqMusicLoginPanel} type="button">QQ 音乐登录</button>
-              )}
-            </>
-          )}
-        </div>
         <button className="ui-hide-btn" onClick={() => setUiHidden(true)} type="button">隐藏界面 · H</button>
       </header>
       )}
@@ -2710,6 +2935,37 @@ function App() {
               aria-label="开启或关闭音乐播客"
             />
           </label>
+          <label className="setting-row">
+            <span>
+              <strong>单曲循环</strong>
+              <small>{singleLoop ? "当前歌曲播放结束后会重新播放" : "播放结束后按队列继续下一首"}</small>
+            </span>
+            <input
+              type="checkbox"
+              checked={singleLoop}
+              onChange={(event) => setSingleLoop(event.target.checked)}
+              aria-label="开启或关闭单曲循环"
+            />
+          </label>
+          <div className="account-tools">
+            <strong>{cloudUser ? `云韶账号：${cloudUser.username}` : "云韶账号未登录"}</strong>
+            <span>{cloudUser ? `拾遗 ${cloudUser.savedCount || 0} · 最近播放 ${cloudUser.historyCount || 0}` : "登录后可跨设备同步拾遗、最近播放和绑定的音乐账号。"}</span>
+            <div className="admin-row">
+              <button type="button" onClick={bindCurrentMusicAccounts}>绑定当前音乐账号</button>
+              <button type="button" onClick={syncCloudLibrary}>手动同步歌单</button>
+              {!cloudUser && activatedInvite && (
+                <button type="button" onClick={() => {
+                  setAccountMode("register");
+                  setAccountInvite("");
+                  setAccessGranted(false);
+                  setAccessMessage("请创建云韶账号，系统会使用当前已激活的邀请码");
+                }}>绑定邀请码到新账号</button>
+              )}
+              {cloudUser && (
+                <button type="button" onClick={logoutCloudAccount}>退出云韶</button>
+              )}
+            </div>
+          </div>
         </section>
       )}
 
@@ -2804,8 +3060,12 @@ function App() {
 
       {!uiHidden && loginOpen && (
         <section className="login-panel" role="dialog" aria-modal="true" aria-label="音乐平台登录">
-          <button className="panel-close" aria-label="关闭登录面板" type="button" onClick={() => setLoginOpen(false)}>×</button>
-          <div className="login-title">{loginProvider === "qq" ? "QQ 音乐登录" : "网易云登录"}</div>
+          <button className="panel-close" aria-label="关闭登录面板" type="button" onClick={() => {
+            setLoginOpen(false);
+            setBindingMusicAccount(false);
+          }}>×</button>
+          <div className="login-title">{bindingMusicAccount ? "绑定音乐账号" : loginProvider === "qq" ? "QQ 音乐登录" : "网易云登录"}</div>
+          {bindingMusicAccount && <div className="login-hint">请选择网易云或 QQ 音乐登录，成功后会绑定到当前云韶账号。</div>}
           <div className="login-provider-tabs">
             <button className={loginProvider === "netease" ? "on" : ""} type="button" onClick={() => openLoginPanel("qr")}>网易云</button>
             <button className={loginProvider === "qq" ? "on" : ""} type="button" onClick={openQqMusicLoginPanel}>QQ 音乐</button>

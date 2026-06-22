@@ -133,6 +133,49 @@ button {
   font-size: 12px;
 }
 
+.account-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.account-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.account-tabs button,
+.account-form button {
+  border: 1px solid rgba(255, 210, 122, 0.24);
+  border-radius: 10px;
+  background: rgba(255, 210, 122, 0.08);
+  color: var(--gold);
+  padding: 10px 12px;
+}
+
+.account-tabs button.on {
+  background: rgba(255, 210, 122, 0.18);
+  border-color: rgba(255, 210, 122, 0.48);
+}
+
+.account-form input {
+  min-width: 0;
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+.account-form small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .admin-form label,
 .admin-password-form label {
   display: grid;
@@ -908,6 +951,36 @@ canvas {
   background: var(--gold);
 }
 
+.account-tools {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.account-tools strong {
+  color: var(--gold-soft);
+  font-size: 13px;
+}
+
+.account-tools span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.account-tools button {
+  border: 1px solid rgba(255, 210, 122, 0.28);
+  border-radius: 999px;
+  background: rgba(255, 210, 122, 0.09);
+  color: var(--gold);
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
 .login-title {
   font-family: var(--serif);
   letter-spacing: 0.18em;
@@ -915,6 +988,14 @@ canvas {
   color: var(--gold-soft);
   margin-bottom: 18px;
   font-size: 22px;
+}
+
+.login-hint {
+  color: var(--muted);
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: -8px 0 14px;
 }
 
 .login-tabs {
