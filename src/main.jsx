@@ -1812,8 +1812,8 @@ function App() {
 
   function buildPlaybackQueue(track) {
     if (!track) return [];
-    if (!isLoggedIn) return [track];
     const source = playbackSourceTracks();
+    if (!source.length) return [track];
     const currentKey = trackKey(track);
     const index = source.findIndex((item) => trackKey(item) === currentKey);
     const ordered = index >= 0 ? [...source.slice(index), ...source.slice(0, index)] : [track, ...source];
@@ -2059,11 +2059,6 @@ function App() {
       if (singleLoop) {
         audio.currentTime = 0;
         audio.play().catch(() => null);
-        return;
-      }
-      if (!isLoggedIn) {
-        setIsPlaying(false);
-        setMessage("播放完成");
         return;
       }
       const nextIndex = queueIndexRef.current + 1;
