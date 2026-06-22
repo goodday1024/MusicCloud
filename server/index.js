@@ -538,10 +538,10 @@ function shouldUsePersistentBlob() {
 async function readPersistentJson(filePath, blobName, fallback) {
   if (shouldUsePersistentBlob()) {
     try {
-      const blob = await get(`${persistentJsonPrefix}/${blobName}`, { access: "private" });
-      const response = await fetch(blob.url);
-      if (!response.ok) throw new Error(`Blob read failed: ${response.status}`);
-      return JSON.parse(await response.text());
+      const result = await get(`${persistentJsonPrefix}/${blobName}`, { access: "private", useCache: false });
+      if (!result?.stream) return fallback;
+      const text = await new Response(result.stream).text();
+      return text ? JSON.parse(text) : fallback;
     } catch (error) {
       if (!/not found|404|BlobNotFound/i.test(error?.message || error?.name || "")) {
         console.warn(`readPersistentJson blob failed for ${blobName}:`, error?.message || error);
