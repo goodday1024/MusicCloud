@@ -1,15 +1,18 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import * as THREE from "three";
+import ThreeGlobe from "three-globe";
 import "./styles.css";
 
 const BRAND_CN = "云韶";
 const BRAND_EN = "CaelumShao";
 const LIBRARY_CACHE_KEY = "caelumshao.libraryTracks.v1";
 const PODCAST_ENABLED_KEY = "caelumshao.podcastEnabled.v1";
+const BETA_ENABLED_KEY = "caelumshao.betaEnabled.v1";
 const RESOLVED_MUSIC_CACHE_KEY = "caelumshao.resolvedMusicCache.v1";
 const LYRICS_CACHE_KEY = "caelumshao.lyricsCache.v1";
 const PODCAST_CACHE_KEY = "caelumshao.podcastCache.v1";
+const RECENT_TRACKS_KEY = "caelumshao.recentTracks.v1";
 const PODCAST_CACHE_TTL = 24 * 60 * 60 * 1000;
 const ADMIN_PASSWORD_KEY = "caelumshao.adminPassword.v1";
 const ACCESS_GRANTED_KEY = "caelumshao.accessGranted.v1";
@@ -123,7 +126,12 @@ function compactLibraryTrack(track = {}) {
     playlistId: track.playlistId || "",
     playlistName: track.playlistName || "",
     playlistDescription: track.playlistDescription || "",
-    playCount: track.playCount || 0
+    playCount: track.playCount || 0,
+    geoRegionKey: track.geoRegionKey || "",
+    geoRegionName: track.geoRegionName || "",
+    geoRegionLat: track.geoRegionLat || "",
+    geoRegionLng: track.geoRegionLng || "",
+    geoRegionTint: track.geoRegionTint || ""
   };
 }
 
@@ -295,6 +303,58 @@ function withArtistCenters(tracks, enabled) {
   return next;
 }
 
+const GEO_REGIONS = [
+  { key: "cn-mainland", name: "中国大陆", lat: 35, lng: 104, tint: 0.97 },
+  { key: "hk-mo-tw", name: "港澳台", lat: 23.8, lng: 121, tint: 0.88 },
+  { key: "jp", name: "日本", lat: 36.2, lng: 138.2, tint: 0.82 },
+  { key: "kr", name: "韩国", lat: 36.4, lng: 127.8, tint: 0.8 },
+  { key: "sea", name: "东南亚", lat: 10.6, lng: 105.8, tint: 0.7 },
+  { key: "eu", name: "欧洲", lat: 50.2, lng: 10.1, tint: 0.62 },
+  { key: "na", name: "北美", lat: 40.7, lng: -97.5, tint: 0.58 },
+  { key: "sa", name: "南美", lat: -15.8, lng: -60.8, tint: 0.56 },
+  { key: "me", name: "中东", lat: 26.8, lng: 46.5, tint: 0.64 },
+  { key: "af", name: "非洲", lat: 1.2, lng: 22.2, tint: 0.54 },
+  { key: "oc", name: "大洋洲", lat: -25.6, lng: 134.2, tint: 0.6 },
+  { key: "global", name: "全球", lat: 0, lng: 0, tint: 0.68 }
+];
+
+function hasCjk(value) {
+  return /[\u3400-\u9fff]/.test(String(value || ""));
+}
+
+function hasKorean(value) {
+  return /[\u3130-\u318F\uAC00-\uD7AF]/.test(String(value || ""));
+}
+
+function hasJapanese(value) {
+  return /[\u3040-\u30ff]/.test(String(value || ""));
+}
+
+function resolveGeoRegion(track, seed = 0) {
+  const explicit = String(track?.country || track?.region || track?.area || track?.countryName || track?.artistCountry || track?.artistRegion || "").trim();
+  const normalized = normalizeText(explicit);
+  if (normalized) {
+    if (/(中国|china|cn|大陆|内地|中国大陆)/.test(normalized)) return GEO_REGIONS[0];
+    if (/(港|澳|台|hong kong|taiwan|macau)/.test(normalized)) return GEO_REGIONS[1];
+    if (/(日本|japan|jp)/.test(normalized)) return GEO_REGIONS[2];
+    if (/(韩国|korea|kr|south korea)/.test(normalized)) return GEO_REGIONS[3];
+    if (/(东南亚|sea|singapore|malaysia|thailand|indonesia|vietnam|philippines)/.test(normalized)) return GEO_REGIONS[4];
+    if (/(欧洲|europe|eu|uk|united kingdom|france|germany|italy|spain|netherlands|sweden)/.test(normalized)) return GEO_REGIONS[5];
+    if (/(北美|na|usa|united states|america|canada|mexico)/.test(normalized)) return GEO_REGIONS[6];
+    if (/(南美|south america|brazil|argentina|chile|peru)/.test(normalized)) return GEO_REGIONS[7];
+    if (/(中东|middle east|uae|saudi|turkey|israel|iran|iraq|qatar)/.test(normalized)) return GEO_REGIONS[8];
+    if (/(非洲|africa|egy|nigeria|south africa|kenya|morocco)/.test(normalized)) return GEO_REGIONS[9];
+    if (/(大洋洲|oceania|australia|new zealand)/.test(normalized)) return GEO_REGIONS[10];
+  }
+  const fingerprint = `${track?.artist || ""} ${track?.title || ""} ${track?.playlistName || ""}`;
+  if (hasKorean(fingerprint)) return GEO_REGIONS[3];
+  if (hasJapanese(fingerprint)) return GEO_REGIONS[2];
+  if (hasCjk(fingerprint)) return GEO_REGIONS[0];
+  const hash = Math.abs(Array.from(fingerprint || String(seed)).reduce((sum, ch) => sum + ch.charCodeAt(0) * 17, 0));
+  const pool = [GEO_REGIONS[5], GEO_REGIONS[6], GEO_REGIONS[4], GEO_REGIONS[7], GEO_REGIONS[8], GEO_REGIONS[9], GEO_REGIONS[10]];
+  return pool[hash % pool.length] || GEO_REGIONS[11];
+}
+
 function sortVisibleTracks(list, sortMode) {
   const next = [...list];
   const withName = (a, b) => String(a?.title || "").localeCompare(String(b?.title || ""), "zh-Hans-CN");
@@ -317,7 +377,7 @@ function pickRenderTracks(list, selectedKey = "", maxTracks = RENDER_LIMITS.low.
   const seen = new Set();
   list.forEach((track, index) => {
     if (picked.length >= Math.floor(maxTracks * 0.32)) return;
-    if (!track?.artistCenter) return;
+    if (!track?.artistCenter && !track?.regionCenter) return;
     picked.push(track);
     seen.add(index);
   });
@@ -390,7 +450,173 @@ function nebulaLayerColor(point) {
   return color;
 }
 
-function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false, jumping = false, deepFocus = false, globalMode = false, qualityMode = "low", artistQuery = "", resetToken = 0, onSelect, onHover, onBlankDoubleClick }) {
+function normalizeRegionName(value) {
+  const text = normalizeText(value);
+  if (!text) return "";
+  if (/(中国|china|cn|大陆|内地|中国大陆|华语|国语|mandarin|c-pop|华语乐坛)/.test(text)) return "中国";
+  if (/(港|澳|台|hong kong|taiwan|macau|hk|tw)/.test(text)) return "港澳台";
+  if (/(日本|japan|jp|j-pop|日语)/.test(text)) return "日本";
+  if (/(韩国|korea|kr|k-pop|韩语|south korea)/.test(text)) return "韩国";
+  if (/(东南亚|sea|singapore|malaysia|thailand|indonesia|vietnam|philippines)/.test(text)) return "东南亚";
+  if (/(欧洲|europe|eu|uk|britain|united kingdom|france|germany|italy|spain|netherlands|sweden)/.test(text)) return "欧洲";
+  if (/(北美|na|usa|united states|america|canada|mexico)/.test(text)) return "北美";
+  if (/(南美|south america|brazil|argentina|chile|peru)/.test(text)) return "南美";
+  if (/(中东|middle east|uae|saudi|turkey|israel|iran|iraq|qatar)/.test(text)) return "中东";
+  if (/(非洲|africa|egy|nigeria|south africa|kenya|morocco)/.test(text)) return "非洲";
+  if (/(大洋洲|oceania|australia|new zealand)/.test(text)) return "大洋洲";
+  return "";
+}
+
+function resolveEarthRegion(track, seed = 0) {
+  const raw = track?.raw || {};
+  const explicit = String([
+    track?.country,
+    track?.region,
+    track?.area,
+    track?.countryName,
+    track?.artistCountry,
+    track?.artistRegion,
+    track?.geoRegionName,
+    track?.playlistDescription,
+    track?.album,
+    track?.artist,
+    track?.title,
+    track?.sourcePlatform,
+    raw.country,
+    raw.region,
+    raw.area,
+    raw.countryName,
+    raw.artistCountry,
+    raw.artistRegion,
+    raw.province,
+    raw.city,
+    raw.location,
+    raw.areaName,
+    raw.singer,
+    raw.singerName,
+    raw.language,
+    raw.lan,
+    raw.songtype,
+    raw.tag,
+    raw.tags,
+    raw.genre
+  ].flatMap((value) => Array.isArray(value) ? value : [value]).filter(Boolean).join(" ")).trim();
+  const normalized = normalizeRegionName(explicit);
+  const regionMap = {
+    中国: { key: "cn", name: "中国", lat: 35, lng: 104, tint: "#ff8a6b" },
+    港澳台: { key: "hktw", name: "港澳台", lat: 23.8, lng: 121, tint: "#ff9f43" },
+    日本: { key: "jp", name: "日本", lat: 36.2, lng: 138.2, tint: "#f8f0e4" },
+    韩国: { key: "kr", name: "韩国", lat: 36.4, lng: 127.8, tint: "#89d6a8" },
+    东南亚: { key: "sea", name: "东南亚", lat: 10.6, lng: 105.8, tint: "#5cc9b2" },
+    欧洲: { key: "eu", name: "欧洲", lat: 50.2, lng: 10.1, tint: "#8fe0ff" },
+    北美: { key: "na", name: "北美", lat: 40.7, lng: -97.5, tint: "#c2d5ff" },
+    南美: { key: "sa", name: "南美", lat: -15.8, lng: -60.8, tint: "#ffc47e" },
+    中东: { key: "me", name: "中东", lat: 26.8, lng: 46.5, tint: "#f1ba84" },
+    非洲: { key: "af", name: "非洲", lat: 1.2, lng: 22.2, tint: "#d0b07a" },
+    大洋洲: { key: "oc", name: "大洋洲", lat: -25.6, lng: 134.2, tint: "#b5e6d6" }
+  };
+  if (normalized && regionMap[normalized]) return regionMap[normalized];
+  const fingerprint = [
+    track?.artist || "",
+    track?.title || "",
+    track?.playlistName || "",
+    track?.album || "",
+    track?.sourcePlatform || "",
+    raw.singer || "",
+    raw.singerName || "",
+    raw.singerid || "",
+    raw.mid || "",
+    raw.songmid || "",
+    raw.albumMid || "",
+    raw.language || ""
+  ].join(" ");
+  if (hasKorean(fingerprint)) return regionMap.韩国;
+  if (hasJapanese(fingerprint)) return regionMap.日本;
+  if (hasCjk(fingerprint)) return regionMap.中国;
+  const hash = Math.abs(Array.from(fingerprint || String(seed)).reduce((sum, ch) => sum + ch.charCodeAt(0) * 17, 0));
+  const pool = [regionMap.中国, regionMap.日本, regionMap.韩国, regionMap.欧洲, regionMap.北美, regionMap.东南亚, regionMap.南美];
+  return pool[hash % pool.length] || regionMap.中国;
+}
+
+function annotateEarthTrack(track, seed = 0) {
+  const region = resolveEarthRegion(track, seed);
+  const raw = track?.raw || {};
+  return {
+    ...track,
+    geoRegionKey: region.key,
+    geoRegionName: region.name,
+    geoRegionLat: region.lat,
+    geoRegionLng: region.lng,
+    geoRegionTint: region.tint,
+    geoRegionSource: [
+      track?.country,
+      track?.region,
+      track?.area,
+      track?.countryName,
+      track?.artistCountry,
+      track?.artistRegion,
+      track?.geoRegionName,
+      track?.playlistDescription,
+      track?.album,
+      track?.artist,
+      raw.country,
+      raw.region,
+      raw.area,
+      raw.countryName,
+      raw.artistCountry,
+      raw.artistRegion,
+      raw.province,
+      raw.city,
+      raw.location,
+      raw.areaName,
+      raw.singer,
+      raw.singerName,
+      raw.language,
+      raw.lan,
+      raw.songtype,
+      raw.tag,
+      raw.tags,
+      raw.genre
+    ].filter(Boolean).join(" ")
+  };
+}
+
+function annotateEarthTracks(tracks = []) {
+  return (Array.isArray(tracks) ? tracks : []).map((track, index) => annotateEarthTrack(track, index));
+}
+
+function withEarthRegions(tracks) {
+  const groups = new Map();
+  tracks.forEach((track, index) => {
+    if (!track || track.placeholder) return;
+    const region = resolveEarthRegion(track, index);
+    if (!groups.has(region.key)) {
+      groups.set(region.key, { ...region, tracks: [] });
+    }
+    groups.get(region.key).tracks.push({ ...track, geoRegionKey: region.key, geoRegionName: region.name });
+  });
+  const next = [];
+  [...groups.values()]
+    .sort((a, b) => b.tracks.length - a.tracks.length || a.name.localeCompare(b.name, "zh-Hans-CN"))
+    .forEach((region) => {
+      next.push({
+        id: `region:${region.key}`,
+        libraryKey: `region:${region.key}`,
+        title: region.name,
+        artist: `${region.tracks.length} 首歌`,
+        geoRegionKey: region.key,
+        geoRegionName: region.name,
+        geoRegionLat: region.lat,
+        geoRegionLng: region.lng,
+        regionCenter: true,
+        regionSongs: region.tracks
+      });
+      next.push(...region.tracks);
+    });
+  return next;
+}
+
+function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false, jumping = false, deepFocus = false, globalMode = false, qualityMode = "low", artistQuery = "", sceneMode = "nebula", resetToken = 0, onSelect, onHover, onBlankDoubleClick }) {
   const mountRef = useRef(null);
   const runtimeRef = useRef(null);
   const tracksRef = useRef(tracks);
@@ -404,6 +630,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
   const globalModeRef = useRef(globalMode);
   const qualityModeRef = useRef(qualityMode);
   const artistQueryRef = useRef(artistQuery);
+  const sceneModeRef = useRef(sceneMode);
   const resetTokenRef = useRef(resetToken);
   const onBlankDoubleClickRef = useRef(onBlankDoubleClick);
 
@@ -461,6 +688,11 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
   }, [artistQuery]);
 
   useEffect(() => {
+    sceneModeRef.current = sceneMode;
+    runtimeRef.current?.updateInstances({ resetProgressive: true });
+  }, [sceneMode]);
+
+  useEffect(() => {
     if (resetTokenRef.current === resetToken) return;
     resetTokenRef.current = resetToken;
     runtimeRef.current?.resetCamera();
@@ -471,7 +703,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     if (!host) return undefined;
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(46, 1, 0.1, 100);
+    const camera = new THREE.PerspectiveCamera(46, 1, 0.1, 160);
     camera.position.set(0, 0, 6);
 
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
@@ -487,6 +719,22 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     group.rotation.z = -0.08;
     scene.add(group);
 
+    const earthGroup = new THREE.Group();
+    earthGroup.visible = false;
+    earthGroup.rotation.set(0.08, -0.56, 0.04);
+    scene.add(earthGroup);
+
+    const ambientLight = new THREE.AmbientLight(0xe6f7ff, 1.2);
+    const hemisphereLight = new THREE.HemisphereLight(0xdff8ff, 0x0b1020, 1.8);
+    const sunLight = new THREE.DirectionalLight(0xffffff, 2.8);
+    sunLight.position.set(3.5, 1.8, 4.8);
+    const rimLight = new THREE.DirectionalLight(0xa8dfff, 1.15);
+    rimLight.position.set(-4, 0.5, -2.5);
+    scene.add(ambientLight);
+    scene.add(hemisphereLight);
+    scene.add(sunLight);
+    scene.add(rimLight);
+
     const mistGroup = new THREE.Group();
     mistGroup.rotation.x = -0.1;
     mistGroup.rotation.z = 0.06;
@@ -497,6 +745,9 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     let beams = null;
     let mistCloud = null;
     let mistDrift = null;
+    let earthGlobe = null;
+    let earthRegionLookup = [];
+    let earthPickTargets = [];
     let positions = [];
     let renderList = [];
     let activeId = -1;
@@ -718,6 +969,137 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       };
     };
 
+    const setEarthVisibility = (visible) => {
+      earthGroup.visible = visible;
+      group.visible = !visible;
+      host.classList.toggle("is-earth-view", visible);
+    };
+
+    const getActiveSceneGroup = () => (sceneModeRef.current === "earth" ? earthGroup : group);
+    const pointToVector = (lat, lng) => {
+      const phi = (90 - Number(lat || 0)) * Math.PI / 180;
+      const theta = (90 - Number(lng || 0)) * Math.PI / 180;
+      const r = 1.01;
+      const sinPhi = Math.sin(phi);
+      return new THREE.Vector3(
+        r * sinPhi * Math.cos(theta),
+        r * Math.cos(phi),
+        r * sinPhi * Math.sin(theta)
+      );
+    };
+    const earthTrackFromPointer = (event) => {
+      if (!earthPickTargets.length || sceneModeRef.current !== "earth") return null;
+      const rect = renderer.domElement.getBoundingClientRect();
+      const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      const y = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
+      raycaster.setFromCamera({ x, y }, camera);
+      const ray = raycaster.ray;
+      let best = null;
+      let bestScore = Infinity;
+      earthPickTargets.forEach((target) => {
+        const worldPoint = pointToVector(target.lat, target.lng).applyEuler(earthGroup.rotation).multiplyScalar(earthGroup.scale.x || 1);
+        const score = ray.distanceSqToPoint(worldPoint);
+        if (score < bestScore) {
+          bestScore = score;
+          best = target;
+        }
+      });
+      return bestScore < 0.12 ? best : null;
+    };
+    const keepEarthOutside = () => {
+      if (sceneModeRef.current !== "earth") return;
+      const minDistance = 8.8;
+      const len = camera.position.length();
+      if (len > 0 && len < minDistance) {
+        camera.position.normalize().multiplyScalar(minDistance);
+      }
+      if (!Number.isFinite(camera.position.x) || !Number.isFinite(camera.position.y) || !Number.isFinite(camera.position.z)) {
+        camera.position.set(0, 0, minDistance);
+      }
+      camera.position.z = Math.max(camera.position.z, 6.2);
+    };
+
+    const buildEarthScene = () => {
+      const earthTracks = annotateEarthTracks(tracksRef.current).filter((track) => !track.placeholder);
+      earthPickTargets = earthTracks.map((track, index) => ({
+        index,
+        key: trackKey(track),
+        lat: Number(track.geoRegionLat || 0),
+        lng: Number(track.geoRegionLng || 0),
+        track
+      }));
+      const regionGroups = new Map();
+      earthTracks.forEach((track) => {
+        if (!regionGroups.has(track.geoRegionKey)) {
+          regionGroups.set(track.geoRegionKey, {
+            key: track.geoRegionKey,
+            name: track.geoRegionName,
+            lat: track.geoRegionLat,
+            lng: track.geoRegionLng,
+            tint: track.geoRegionTint,
+            tracks: []
+          });
+        }
+        regionGroups.get(track.geoRegionKey).tracks.push(track);
+      });
+      earthRegionLookup = [...regionGroups.values()];
+
+      const globe = earthGlobe || new ThreeGlobe({ waitForGlobeReady: false, animateIn: false })
+        .globeImageUrl("https://cdn.jsdelivr.net/npm/three-globe/example/img/earth-blue-marble.jpg")
+        .bumpImageUrl("https://cdn.jsdelivr.net/npm/three-globe/example/img/earth-topology.png")
+        .showGlobe(true)
+        .showGraticules(false)
+        .showAtmosphere(true)
+        .atmosphereColor("#86d4ff")
+        .atmosphereAltitude(0.22)
+        .globeCurvatureResolution(2)
+        .pointsData(earthPickTargets.map((point, index) => ({
+          lat: point.lat,
+          lng: point.lng,
+          regionKey: point.track.geoRegionKey,
+          regionName: point.track.geoRegionName,
+          index,
+          title: point.track.title,
+          artist: point.track.artist,
+          cover: point.track.cover,
+          year: point.track.year,
+          track: point.track,
+          size: Math.max(0.18, Math.min(0.36, 0.14 + index % 7 * 0.015))
+        })))
+        .pointLat("lat")
+        .pointLng("lng")
+        .pointColor((point) => {
+          const selected = earthSelectionKey && point.regionKey === earthSelectionKey.replace("region:", "");
+          return selected ? "#ffe28a" : "#ffffff";
+        })
+        .pointAltitude((point) => {
+          const selected = earthSelectionKey && point.regionKey === earthSelectionKey.replace("region:", "");
+          return selected ? 0.16 : 0.1;
+        })
+        .pointRadius((point) => {
+          const selected = earthSelectionKey && point.regionKey === earthSelectionKey.replace("region:", "");
+          return selected ? 0.52 : 0.34;
+        })
+        .pointsTransitionDuration(650)
+        .ringsData([])
+        .ringLat("lat")
+        .ringLng("lng")
+        .ringColor(() => ["rgba(255,255,255,0.62)", "rgba(129,218,255,0.4)", "rgba(255,232,150,0.18)"])
+        .ringMaxRadius(3.2)
+        .ringPropagationSpeed(1.6)
+        .ringRepeatPeriod(850);
+      globe.position.set(0, 0, 0);
+      globe.scale.setScalar(0.0135);
+      if (!earthGlobe) {
+        earthGlobe = globe;
+        earthGroup.add(globe);
+      }
+      earthGlobe.visible = true;
+      earthGroup.scale.setScalar(1.12);
+      earthGroup.visible = true;
+      earthGlobe.setPointOfView?.(camera);
+    };
+
     const resize = () => {
       const rect = host.getBoundingClientRect();
       const width = Math.max(1, rect.width);
@@ -744,14 +1126,17 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       }
       const generation = ++buildGeneration;
       const effectiveQuality = qualityModeRef.current === "high" && !progressiveReady ? "low" : qualityModeRef.current;
-      const sourceTracks = tracksRef.current.length
-        ? pickRenderTracks(
-            tracksRef.current,
-            selectedKeyRef.current,
-            globalModeRef.current
-              ? (GLOBAL_RENDER_LIMITS[effectiveQuality]?.tracks || GLOBAL_RENDER_LIMITS.low.tracks)
-              : (RENDER_LIMITS[effectiveQuality]?.tracks || RENDER_LIMITS.low.tracks)
-          )
+      const sceneTracks = sceneModeRef.current === "earth" ? annotateEarthTracks(tracksRef.current) : tracksRef.current;
+      const sourceTracks = sceneTracks.length
+        ? (sceneModeRef.current === "earth"
+          ? sceneTracks
+          : pickRenderTracks(
+              sceneTracks,
+              selectedKeyRef.current,
+              globalModeRef.current
+                ? (GLOBAL_RENDER_LIMITS[effectiveQuality]?.tracks || GLOBAL_RENDER_LIMITS.low.tracks)
+                : (RENDER_LIMITS[effectiveQuality]?.tracks || RENDER_LIMITS.low.tracks)
+            ))
         : Array.from({ length: 220 }, (_, index) => ({
             title: "等待曲库",
             artist: BRAND_CN,
@@ -780,7 +1165,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
 
       const artistCenters = new Map();
       const artistGroups = new Map();
-      if (globalModeRef.current) {
+      if (globalModeRef.current && sceneModeRef.current === "nebula") {
         list.forEach((track) => {
           if (track.artistCenter) artistCenters.set(track.artistGroupKey, null);
           else if (track.artistGroupKey) {
@@ -792,6 +1177,14 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
 
       positions = list.map((track, index) => {
         const seed = String(track.libraryKey || track.id || track.title || index).split("").reduce((sum, ch) => sum + ch.charCodeAt(0), 0);
+        if (sceneModeRef.current === "earth") {
+          const region = resolveEarthRegion(track, index);
+          return new THREE.Vector3(
+            Math.cos((region.lng || 0) * Math.PI / 180) * (1.46 + seededNoise(seed + 72) * 0.08),
+            Math.sin((region.lat || 0) * Math.PI / 180) * 1.46,
+            Math.sin((region.lng || 0) * Math.PI / 180) * (1.46 + seededNoise(seed + 44) * 0.08)
+          );
+        }
         if (!globalModeRef.current) return galaxyPoint(index, Math.max(list.length, 1), seed);
         if (track.artistCenter) {
           const centerIndex = [...artistCenters.keys()].indexOf(track.artistGroupKey);
@@ -901,7 +1294,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       list.forEach((track, index) => {
         const isActive = index === activeId;
         const isHover = index === hoverId;
-        const isGlobalHit = globalModeRef.current && !track.placeholder && (track.globalSearch || track.artistCenter);
+        const isGlobalHit = globalModeRef.current && !track.placeholder && (track.globalSearch || track.artistCenter || track.regionCenter);
         const artistHit = q && normalizeText(track.artistGroupName || track.title || track.artist || "").includes(q);
         const isSearchGold = isGlobalHit && (!q || artistHit || track.globalSearchMode === "artist");
         const lifted = positions[index].clone();
@@ -911,10 +1304,16 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
         trackPositions[index * 3] = lifted.x;
         trackPositions[index * 3 + 1] = lifted.y;
         trackPositions[index * 3 + 2] = lifted.z;
-        color.copy(isSearchGold ? goldColor : track.artistCenter || isActive ? coreStarColor : isHover ? hoverStarColor : nebulaLayerColor(lifted));
+        color.copy(
+          sceneModeRef.current === "earth"
+            ? (track.regionCenter ? new THREE.Color(0xf1ffff) : new THREE.Color(0x9fd7f2))
+            : (isSearchGold ? goldColor : track.artistCenter || isActive ? coreStarColor : isHover ? hoverStarColor : nebulaLayerColor(lifted))
+        );
         const boost = isSearchGold
           ? (track.artistCenter ? 3.85 : 2.55)
-          : track.artistCenter
+          : sceneModeRef.current === "earth"
+            ? (track.regionCenter ? 3.25 : 1.62)
+            : track.artistCenter
             ? 2.35
             : isActive
               ? 1.95
@@ -926,8 +1325,8 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
         trackColors[index * 3] = color.r * boost;
         trackColors[index * 3 + 1] = color.g * boost;
         trackColors[index * 3 + 2] = color.b * boost;
-        if (!track.placeholder && !track.artistCenter) {
-          const height = isSearchGold || isActive || isHover ? 1.35 : 0.58;
+        if (!track.placeholder && !track.artistCenter && !track.regionCenter) {
+          const height = isSearchGold || isActive || isHover ? 1.55 : 0.7;
           beamVertices.push(lifted.x, lifted.y + 0.06, lifted.z, lifted.x, lifted.y + height, lifted.z);
         }
       });
@@ -941,11 +1340,17 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       beams = new THREE.LineSegments(beamGeometry, beamMaterial);
       beams.visible = beamVertices.length > 0;
       group.add(beams);
+      if (sceneModeRef.current === "earth") {
+        buildEarthScene();
+        setEarthVisibility(true);
+      } else {
+        setEarthVisibility(false);
+      }
       scheduleFullQuality(generation);
     };
 
     const resetCamera = () => {
-      camera.position.set(0, 0, 6);
+      camera.position.set(0, 0, sceneModeRef.current === "earth" ? 7.2 : 6);
       cameraVelocity.set(0, 0, 0);
       rotationVelocity.set(0, 0);
       wheelZoom = 0.42;
@@ -954,6 +1359,9 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       group.rotation.x = -0.12;
       group.rotation.y = 0;
       group.rotation.z = -0.08;
+      earthGroup.rotation.set(0.08, -0.56, 0.04);
+      earthGroup.position.set(0, 0, 0);
+      earthGlobe?.setPointOfView?.(camera);
     };
 
     const setPointerFromEvent = (event) => {
@@ -966,6 +1374,10 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       if (!trackCloud) return null;
       setPointerFromEvent(event);
       raycaster.setFromCamera(pointer, camera);
+      if (sceneModeRef.current === "earth" && earthPickTargets.length) {
+        const target = earthTrackFromPointer(event);
+        if (target) return target.index;
+      }
       if (hasFocus && activeId >= 0) {
         focusHalo.updateMatrixWorld();
         const coreHit = raycaster.intersectObject(focusHalo)[0];
@@ -979,13 +1391,25 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       if (nextId === hoverId) return;
       hoverId = Number.isFinite(nextId) ? nextId : -1;
       const track = hoverId >= 0 ? renderList[hoverId] : null;
-      host.classList.toggle("has-hover", Boolean(track && !track.placeholder));
-      onHoverRef.current?.(track && !track.placeholder ? track : null);
+      const hoverTrack = track && !track.placeholder ? track : null;
+      host.classList.toggle("has-hover", Boolean(hoverTrack));
+      onHoverRef.current?.(hoverTrack);
+      if (hoverTrack) {
+        if (sceneModeRef.current === "earth") setHoveredTrack(hoverTrack);
+        setMessage(sceneModeRef.current === "earth"
+          ? `${hoverTrack.title} · ${hoverTrack.geoRegionName || hoverTrack.playlistName || hoverTrack.artist || "地球歌曲"}`
+          : `${hoverTrack.title} · ${hoverTrack.artist || hoverTrack.playlistName || ""}`);
+      }
     };
 
     const selectInstance = (instanceId) => {
       const track = renderList[instanceId];
       if (!track || track.placeholder) return;
+      if (track.regionCenter) {
+        setEarthSelection(track);
+        onSelectRef.current?.(track);
+        return;
+      }
       activeId = instanceId;
       selectedKeyRef.current = trackKey(track);
       updateInstances();
@@ -1019,7 +1443,9 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
 
     const onPointerMove = (event) => {
       if (!activePointers.has(event.pointerId)) {
-        setHover(hitTest(event));
+        if (sceneModeRef.current === "earth" && dragging) return;
+        const nextHover = hitTest(event);
+        setHover(nextHover);
         return;
       }
       activePointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -1041,18 +1467,29 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       }
       const dx = center.x - lastCenter.x;
       const dy = center.y - lastCenter.y;
+      const activeGroup = getActiveSceneGroup();
       if (isCoarsePointer && activePointers.size === 1) {
         const panScale = Math.max(0.0026, Math.min(0.0052, 1 / Math.max(240, renderer.domElement.getBoundingClientRect().width)));
-        cameraVelocity.addScaledVector(cameraRight, -dx * panScale);
-        cameraVelocity.addScaledVector(cameraForward, dy * panScale * 0.72);
+        if (sceneModeRef.current === "earth") {
+          cameraVelocity.addScaledVector(cameraRight, -dx * panScale * 0.55);
+          cameraVelocity.addScaledVector(cameraForward, dy * panScale * 0.45);
+        } else {
+          cameraVelocity.addScaledVector(cameraRight, -dx * panScale);
+          cameraVelocity.addScaledVector(cameraForward, dy * panScale * 0.72);
+        }
         touchPanVelocity.set(-dx * panScale, dy * panScale, 0);
         rotationVelocity.multiplyScalar(0.92);
       } else {
-        group.rotation.y += dx * 0.0062;
-        group.rotation.x += dy * 0.0046;
+        if (sceneModeRef.current === "earth") {
+          earthGroup.rotation.y += dx * 0.0042;
+          earthGroup.rotation.x += dy * 0.0032;
+        } else {
+          activeGroup.rotation.y += dx * 0.0062;
+          activeGroup.rotation.x += dy * 0.0046;
+        }
         rotationVelocity.set(dx * 0.00036, dy * 0.00028);
       }
-      group.rotation.x = Math.max(-1.08, Math.min(1.08, group.rotation.x));
+      (sceneModeRef.current === "earth" ? earthGroup : activeGroup).rotation.x = Math.max(-1.08, Math.min(1.08, (sceneModeRef.current === "earth" ? earthGroup : activeGroup).rotation.x));
       lastCenter = center;
     };
 
@@ -1065,6 +1502,9 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       if (moved < tapMoveLimit && Date.now() - lastPointerDown.time < tapTimeLimit && trackCloud) {
         const instanceId = hitTest(event);
         if (Number.isFinite(instanceId)) selectInstance(instanceId);
+      } else if (sceneModeRef.current === "earth") {
+        const instanceId = hitTest(event);
+        if (Number.isFinite(instanceId)) setHover(instanceId);
       }
       if (isCoarsePointer && touchHoverPointerId === event.pointerId) {
         window.clearTimeout(touchHoverTimer.id);
@@ -1137,16 +1577,19 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       cameraVelocity.multiplyScalar(panX || depth ? 0.9 : 0.94);
       if (cameraVelocity.lengthSq() < 0.000001) cameraVelocity.set(0, 0, 0);
       camera.position.add(cameraVelocity);
+      keepEarthOutside();
       camera.position.x = Math.max(-7.8, Math.min(7.8, camera.position.x));
       camera.position.y = Math.max(-5.2, Math.min(5.2, camera.position.y));
       camera.position.z = Math.max(0.7, Math.min(24, camera.position.z));
       const bounds = zoomBounds();
+      if (sceneModeRef.current === "earth") bounds.min = Math.max(bounds.min, 0.72);
       wheelZoomTarget = Math.max(bounds.min, Math.min(bounds.max, wheelZoomTarget));
       const jumpBoost = jumpingRef.current ? 0.32 : deepFocusRef.current ? 0.18 : 0;
       const focusScale = hasFocus ? (closeFocus ? 4.1 : 1.68) : 1;
       wheelZoom += (wheelZoomTarget - wheelZoom) * 0.12;
       const pulse = (focusScale + jumpBoost + Math.min(0.06, energyRef.current * 0.06)) * wheelZoom;
-      group.scale.lerp(new THREE.Vector3(pulse, pulse, pulse), closeFocus ? 0.115 : 0.075);
+      const activeGroup = getActiveSceneGroup();
+      activeGroup.scale.lerp(new THREE.Vector3(pulse, pulse, pulse), closeFocus ? 0.115 : 0.075);
       if (hasFocus && !dragging) {
         focusWorld.copy(focusTarget).multiplyScalar(pulse).applyEuler(group.rotation);
         focusWorld.set(-focusWorld.x, -focusWorld.y, -focusWorld.z * 0.16);
@@ -1162,6 +1605,15 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       focusCoreMaterial.opacity = closeFocus ? 0.98 : 0.86;
       const now = performance.now() * 0.001;
       const highQuality = qualityModeRef.current === "high";
+      if (sceneModeRef.current === "earth") {
+        earthGlobe?.setPointOfView?.(camera);
+        earthGroup.visible = true;
+        earthGlobe.visible = true;
+        if (!dragging) {
+          earthGroup.rotation.y += 0.00028 + energyRef.current * 0.0012;
+          earthGroup.rotation.x += 0.00003;
+        }
+      }
       const farAmount = closeFocus
         ? 0
         : Math.max(0, Math.min(1, ((camera.position.z - 4.9) / 6.2) + ((0.92 - wheelZoom) * 0.92)));
@@ -1191,14 +1643,16 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
           touchPanVelocity.multiplyScalar(0.9);
         }
         if (rotationVelocity.lengthSq() > 0.0000001) {
-          group.rotation.y += rotationVelocity.x;
-          group.rotation.x += rotationVelocity.y;
-          group.rotation.x = Math.max(-1.08, Math.min(1.08, group.rotation.x));
+          const activeGroup = getActiveSceneGroup();
+          activeGroup.rotation.y += rotationVelocity.x;
+          activeGroup.rotation.x += rotationVelocity.y;
+          activeGroup.rotation.x = Math.max(-1.08, Math.min(1.08, activeGroup.rotation.x));
           rotationVelocity.multiplyScalar(0.94);
         }
         const playingSpin = playingRef.current ? (closeFocus ? 0.00018 : hasFocus ? 0.00042 : 0.00115) : 0;
-        group.rotation.y += (closeFocus ? 0.00002 : hasFocus ? 0.00008 : 0.00065) + playingSpin + energyRef.current * (closeFocus ? 0.00005 : hasFocus ? 0.00042 : 0.0016);
-        group.rotation.x += closeFocus ? 0.00001 : playingRef.current ? 0.000025 : 0;
+        const activeGroup = getActiveSceneGroup();
+        activeGroup.rotation.y += (closeFocus ? 0.00002 : hasFocus ? 0.00008 : 0.00065) + playingSpin + energyRef.current * (closeFocus ? 0.00005 : hasFocus ? 0.00042 : 0.0016);
+        activeGroup.rotation.x += closeFocus ? 0.00001 : playingRef.current ? 0.000025 : 0;
       }
       renderer.render(scene, camera);
       raf = window.requestAnimationFrame(animate);
@@ -1300,6 +1754,7 @@ function App() {
   const [message, setMessage] = useState("");
   const [isLibraryLoading, setIsLibraryLoading] = useState(false);
   const [viewMode, setViewMode] = useState("歌手");
+  const [sceneMode, setSceneMode] = useState("nebula");
   const [sortMode, setSortMode] = useState("热门");
   const [searchMode, setSearchMode] = useState("歌曲");
   const [query, setQuery] = useState("");
@@ -1310,10 +1765,14 @@ function App() {
   const [globalSearchStats, setGlobalSearchStats] = useState([]);
   const [uiHidden, setUiHidden] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [collectionPanelOpen, setCollectionPanelOpen] = useState(false);
   const [podcastEnabled, setPodcastEnabled] = useState(() => localStorage.getItem(PODCAST_ENABLED_KEY) !== "false");
+  const [betaEnabled, setBetaEnabled] = useState(() => localStorage.getItem(BETA_ENABLED_KEY) === "true");
   const [singleLoop, setSingleLoop] = useState(false);
   const [isCompactControls, setIsCompactControls] = useState(false);
   const [panelOpen, setPanelOpen] = useState(true);
+  const [earthSelection, setEarthSelection] = useState(null);
+  const earthSelectionKey = earthSelection ? trackKey(earthSelection) : "";
   const [savedKeys, setSavedKeys] = useState(() => {
     try {
       return new Set(JSON.parse(localStorage.getItem("agentio.savedTracks") || "[]"));
@@ -1326,6 +1785,13 @@ function App() {
       return JSON.parse(localStorage.getItem("agentio.savedTrackItems") || "{}");
     } catch (_error) {
       return {};
+    }
+  });
+  const [recentTracks, setRecentTracks] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(RECENT_TRACKS_KEY) || "[]");
+    } catch (_error) {
+      return [];
     }
   });
   const [toast, setToast] = useState("");
@@ -1350,6 +1816,8 @@ function App() {
   const podcastEnabledRef = useRef(podcastEnabled);
   const queueRef = useRef([]);
   const queueIndexRef = useRef(-1);
+  const currentTrackRef = useRef(null);
+  const lyricSegmentsRef = useRef([]);
   const playTokenRef = useRef(0);
   const libraryLoadRef = useRef(0);
   const resolvedMusicCacheRef = useRef(readObjectCache(RESOLVED_MUSIC_CACHE_KEY));
@@ -1377,7 +1845,7 @@ function App() {
       if (viewMode === "拾遗") return !track.artistCenter && savedKeys.has(trackKey(track));
       if (viewMode === "封面" && !track.cover) return false;
       if (viewMode === "年代" && !trackYearValue(track)) return false;
-      if (viewMode === "歌单" && !track.playlistName) return false;
+      if (viewMode === "歌单" && !track.playlistName && !track.playlistId) return false;
       if (viewMode === "歌手" && !track.artistCenter) return false;
       return true;
     });
@@ -1391,7 +1859,7 @@ function App() {
     return source.filter((track) => {
       if (searchMode === "年代") return String(trackYearValue(track) || "").includes(q) || trackSearchText(track).includes(q);
       if (searchMode === "歌曲") return normalizeText(track?.title || "").includes(q);
-      if (searchMode === "歌单") return normalizeText(`${track?.playlistName || ""} ${track?.album || ""} ${track?.playlistDescription || ""}`).includes(q);
+      if (searchMode === "歌单") return normalizeText(`${track?.playlistName || ""} ${track?.playlistId || ""} ${track?.album || ""} ${track?.playlistDescription || ""} ${track?.raw?.playlistName || ""} ${track?.raw?.dissname || ""}`).includes(q);
       if (searchMode === "歌手") return normalizeText(track?.artistCenter ? track.title : primaryArtist(track)).includes(q);
       return trackSearchText(track).includes(q);
     }).slice(0, 18);
@@ -1401,12 +1869,27 @@ function App() {
   const displayTrack = panelOpen ? infoTrack || selectedTrack || filteredTracks[0] || libraryTracks[0] || null : null;
   const playlistCount = new Set(libraryTracks.map((track) => track.playlistId).filter(Boolean)).size;
   const titleLines = splitTitle(displayTrack?.title || BRAND_CN);
+  const savedTrackList = useMemo(() => Object.values(savedTrackItems || {}).filter(Boolean), [savedTrackItems]);
+  const recentTrackList = useMemo(() => (Array.isArray(recentTracks) ? recentTracks : []).filter(Boolean), [recentTracks]);
+  const earthSceneTracks = useMemo(() => withEarthRegions(globalSearchEnabled ? globalTracks : libraryTracks), [globalSearchEnabled, globalTracks, libraryTracks]);
   const currentLyricLine = useMemo(() => {
-    if (!isPlaying || !lyricSegments.length) return null;
+    if (!lyricSegments.length) return null;
     return lyricSegments.find((segment) => audioTime >= Number(segment.start || 0) && audioTime < Number(segment.end || Number(segment.start || 0) + 4))
       || [...lyricSegments].reverse().find((segment) => Number(segment.start || 0) <= audioTime)
+      || lyricSegments[0]
       || null;
-  }, [audioTime, isPlaying, lyricSegments]);
+  }, [audioTime, lyricSegments]);
+
+  useEffect(() => {
+    if (sceneMode !== "earth") return;
+    if (earthSelection && !earthSceneTracks.some((track) => trackKey(track) === trackKey(earthSelection))) {
+      setEarthSelection(null);
+    }
+    if (!earthSelection && earthSceneTracks.length) {
+      const firstRegion = earthSceneTracks.find((track) => track.regionCenter);
+      if (firstRegion) setEarthSelection(firstRegion);
+    }
+  }, [earthSceneTracks, earthSelection, sceneMode]);
 
   const adminPage = (
     <section className="admin-panel" role="dialog" aria-modal="true" aria-label="管理员页面">
@@ -1561,6 +2044,10 @@ function App() {
     localStorage.setItem(ADMIN_PASSWORD_KEY, adminPassword);
   }, [adminPassword]);
 
+  useEffect(() => {
+    lyricSegmentsRef.current = lyricSegments;
+  }, [lyricSegments]);
+
   if (isAdminRoute) {
     return (
       <main className="app cloud-stage">
@@ -1636,6 +2123,10 @@ function App() {
       setSavedKeys(new Set(Object.keys(nextItems)));
       localStorage.setItem("agentio.savedTrackItems", JSON.stringify(nextItems));
       localStorage.setItem("agentio.savedTracks", JSON.stringify(Object.keys(nextItems)));
+    }
+    if (Array.isArray(data.history)) {
+      setRecentTracks(data.history);
+      localStorage.setItem(RECENT_TRACKS_KEY, JSON.stringify(data.history.slice(0, 500)));
     }
   }
 
@@ -1735,7 +2226,19 @@ function App() {
   }
 
   function syncPlayHistory(track) {
-    if (!accountToken || !track) return;
+    if (!track) return;
+    const key = trackKey(track);
+    const item = {
+      ...track,
+      key,
+      playedAt: new Date().toISOString()
+    };
+    setRecentTracks((current) => {
+      const next = [item, ...current.filter((entry) => (entry.key || trackKey(entry)) !== key)].slice(0, 500);
+      localStorage.setItem(RECENT_TRACKS_KEY, JSON.stringify(next));
+      return next;
+    });
+    if (!accountToken) return;
     fetch("/api/account/history", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...accountHeaders() },
@@ -1831,7 +2334,9 @@ function App() {
     const key = cacheKeyForTrack(track, "lyrics:");
     const cached = lyricsCacheRef.current[key];
     if (cached?.segments && token === playTokenRef.current) {
-      setLyricSegments(Array.isArray(cached.segments) ? cached.segments : []);
+      const cachedSegments = Array.isArray(cached.segments) ? cached.segments : [];
+      lyricSegmentsRef.current = cachedSegments;
+      setLyricSegments(cachedSegments);
       return;
     }
     try {
@@ -1849,6 +2354,7 @@ function App() {
       const data = await readJsonResponse(response);
       if (token !== playTokenRef.current) return;
       const segments = Array.isArray(data.segments) ? data.segments : [];
+      lyricSegmentsRef.current = segments;
       setLyricSegments(segments);
       lyricsCacheRef.current = {
         ...lyricsCacheRef.current,
@@ -1856,7 +2362,10 @@ function App() {
       };
       writeObjectCache(LYRICS_CACHE_KEY, lyricsCacheRef.current, 260);
     } catch (error) {
-      if (token === playTokenRef.current) setLyricSegments([]);
+      if (token === playTokenRef.current) {
+        lyricSegmentsRef.current = [];
+        setLyricSegments([]);
+      }
       console.debug("lyrics unavailable", error?.message || error);
     }
   }
@@ -1900,7 +2409,7 @@ function App() {
       loadQqMusicLibrary().catch((error) => ({ items: [], warning: error.message || "QQ 音乐曲库暂时没有载入" }))
     ]);
     if (token !== libraryLoadRef.current) return [];
-    const merged = [...neteaseResult.items, ...qqResult.items];
+    const merged = annotateEarthTracks([...neteaseResult.items, ...qqResult.items]);
     const warnings = [neteaseResult.warning, qqResult.warning].filter(Boolean);
     if (merged.length) {
       const oldFingerprint = libraryFingerprint(libraryTracks);
@@ -1913,7 +2422,7 @@ function App() {
     } else if (!libraryTracks.length) {
       const cached = readLibraryCache();
       if (cached.items.length) {
-        setLibraryTracks(cached.items);
+        setLibraryTracks(annotateEarthTracks(cached.items));
         setLibraryCacheMeta(cached);
         setMessage("正在使用上次缓存的曲库，登录可能已过期");
       } else {
@@ -1956,7 +2465,7 @@ function App() {
     loadAllLibraries({ background: Boolean(cached.items.length || libraryTracks.length) }).catch((error) => {
       setIsLibraryLoading(false);
       if (!libraryTracks.length && cached.items.length) {
-        setLibraryTracks(cached.items);
+        setLibraryTracks(annotateEarthTracks(cached.items));
         setLibraryCacheMeta(cached);
       }
       setMessage(error?.message || "正在使用缓存曲库");
@@ -2053,11 +2562,17 @@ function App() {
 
     const onTime = () => setAudioTime(audio.currentTime || 0);
     const onPlay = () => setIsPlaying(true);
-    const onPause = () => setIsPlaying(false);
+    const onPause = () => {
+      if (singleLoop && audio.ended) return;
+      setIsPlaying(false);
+    };
     const onMeta = () => setAudioDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
     const onEnded = () => {
       if (singleLoop) {
         audio.currentTime = 0;
+        setAudioTime(0);
+        const track = currentTrackRef.current || queueRef.current[queueIndexRef.current] || selectedTrack;
+        if (track && !lyricSegmentsRef.current.length) void loadLyricsForTrack(track, playTokenRef.current);
         audio.play().catch(() => null);
         return;
       }
@@ -2107,6 +2622,17 @@ function App() {
       setMessage("播客已关闭，只播放音乐");
     }
   }, [podcastEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem(BETA_ENABLED_KEY, betaEnabled ? "true" : "false");
+    if (!betaEnabled && sceneMode === "earth") {
+      setSceneMode("nebula");
+    }
+  }, [betaEnabled, sceneMode]);
+
+  useEffect(() => {
+    if (!betaEnabled) setSceneMode((mode) => (mode === "earth" ? "nebula" : mode));
+  }, []);
 
   function stopPodcastOverlay() {
     if (window.speechSynthesis) window.speechSynthesis.cancel();
@@ -2237,11 +2763,13 @@ function App() {
     if (!track) return;
     const token = ++playTokenRef.current;
     stopPodcastOverlay();
+    currentTrackRef.current = track;
     queueIndexRef.current = index;
     setQueueIndex(index);
     setSelectedTrack(track);
     setPlayerTitle(track.title || BRAND_CN);
     setPlayerArtist(track.artist || track.playlistName || "podcast mix");
+    lyricSegmentsRef.current = [];
     setLyricSegments([]);
     setMessage(`正在准备播放 ${index + 1}/${queue.length || 1}`);
 
@@ -2533,6 +3061,17 @@ function App() {
 
   async function playTrackFromUi(track, options = {}) {
     if (!track) return;
+    if (track.regionCenter) {
+      setEarthSelection(track);
+      setSceneMode("earth");
+      setPanelOpen(true);
+      setSelectedTrack(track);
+      setHoveredTrack(track);
+      setDeepFocus(true);
+      setJumping(true);
+      flash(`已聚焦 ${track.title}`);
+      return;
+    }
     const shouldFocus = options.focus !== false;
     if (track.artistCenter) {
       setPanelOpen(true);
@@ -2616,11 +3155,25 @@ function App() {
     setViewMode(mode);
     setPanelOpen(true);
     setHoveredTrack(null);
-    setSelectedTrack((current) => {
-      if (current && filteredTracks.some((track) => trackKey(track) === trackKey(current))) return current;
-      return current;
-    });
+    if (sceneMode !== "earth") {
+      setSelectedTrack((current) => {
+        if (current && filteredTracks.some((track) => trackKey(track) === trackKey(current))) return current;
+        return current;
+      });
+    }
     flash(`${mode} 视图`);
+  }
+
+  function selectSceneMode(mode) {
+    setSceneMode(mode);
+    setPanelOpen(true);
+    setEarthSelection((current) => (mode === "earth" ? current : null));
+    setSphereResetToken((value) => value + 1);
+    window.requestAnimationFrame(() => {
+      runtimeRef.current?.updateInstances({ resetProgressive: true });
+      if (mode === "earth") runtimeRef.current?.resetCamera();
+    });
+    flash(mode === "earth" ? "地球视图" : "星云视图");
   }
 
   function selectSortMode(mode) {
@@ -2839,6 +3392,15 @@ function App() {
         <div className="title">
           {BRAND_CN} <span className="title-en">{BRAND_EN}</span>
         </div>
+        {betaEnabled && (
+          <div className="seg">
+            {["nebula", "earth"].map((mode) => (
+              <button key={mode} className={`seg-btn ${sceneMode === mode ? "on" : ""}`} onClick={() => selectSceneMode(mode)} type="button">
+                {mode === "nebula" ? "星云" : "地球"}
+              </button>
+            ))}
+          </div>
+        )}
         {isCompactControls ? (
           <>
             <label className="select-shell">
@@ -2927,10 +3489,28 @@ function App() {
               aria-label="开启或关闭单曲循环"
             />
           </label>
+          <label className="setting-row">
+            <span>
+              <strong>内测模式</strong>
+              <small>{betaEnabled ? "会显示星云 / 地球切换，部分功能可能不稳定" : "隐藏星云 / 地球切换，使用更稳定的基础界面"}</small>
+            </span>
+            <input
+              type="checkbox"
+              checked={betaEnabled}
+              onChange={(event) => {
+                const next = event.target.checked;
+                setBetaEnabled(next);
+                if (next) flash("已开启内测模式，部分功能可能导致网页不稳定");
+                else flash("已关闭内测模式");
+              }}
+              aria-label="开启或关闭内测模式"
+            />
+          </label>
           <div className="account-tools">
             <strong>{cloudUser ? `云韶账号：${cloudUser.username}` : "云韶账号未登录"}</strong>
             <span>{cloudUser ? `拾遗 ${cloudUser.savedCount || 0} · 最近播放 ${cloudUser.historyCount || 0}` : "登录后可跨设备同步拾遗、最近播放和绑定的音乐账号。"}</span>
             <div className="admin-row">
+              <button type="button" onClick={() => setCollectionPanelOpen(true)}>最近播放 / 拾遗</button>
               <button type="button" onClick={bindCurrentMusicAccounts}>绑定当前音乐账号</button>
               <button type="button" onClick={syncCloudLibrary}>手动同步歌单</button>
               {!cloudUser && activatedInvite && (
@@ -2944,6 +3524,33 @@ function App() {
               {cloudUser && (
                 <button type="button" onClick={logoutCloudAccount}>退出云韶</button>
               )}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {!uiHidden && collectionPanelOpen && (
+        <section className="collection-panel" role="dialog" aria-modal="true" aria-label="最近播放与拾遗">
+          <button className="panel-close" aria-label="关闭列表" type="button" onClick={() => setCollectionPanelOpen(false)}>×</button>
+          <div className="settings-title">最近播放 / 拾遗</div>
+          <div className="cover-section">
+            <div className="cover-section-title">最近播放</div>
+            <div className="cover-grid">
+              {recentTrackList.length ? recentTrackList.map((track, index) => (
+                <button key={`${trackKey(track)}-${index}`} className="cover-tile" type="button" onClick={() => playTrackFromUi(track)}>
+                  {track.cover ? <img src={track.cover} alt="" loading="lazy" /> : <span />}
+                </button>
+              )) : <div className="cover-empty">暂无最近播放</div>}
+            </div>
+          </div>
+          <div className="cover-section">
+            <div className="cover-section-title">拾遗</div>
+            <div className="cover-grid">
+              {savedTrackList.length ? savedTrackList.map((track, index) => (
+                <button key={`${trackKey(track)}-${index}`} className="cover-tile" type="button" onClick={() => playTrackFromUi(track)}>
+                  {track.cover ? <img src={track.cover} alt="" loading="lazy" /> : <span />}
+                </button>
+              )) : <div className="cover-empty">暂无拾遗</div>}
             </div>
           </div>
         </section>
@@ -3011,6 +3618,7 @@ function App() {
         globalMode={globalSearchEnabled}
         qualityMode={qualityMode}
         artistQuery={searchMode === "歌手" ? query : ""}
+        sceneMode={sceneMode}
         resetToken={sphereResetToken}
         selectedKey={trackKey(selectedTrack)}
         onSelect={selectSphereTrack}
