@@ -1766,7 +1766,7 @@ function App() {
   const [uiHidden, setUiHidden] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [collectionPanelOpen, setCollectionPanelOpen] = useState(false);
-  const [podcastEnabled, setPodcastEnabled] = useState(() => localStorage.getItem(PODCAST_ENABLED_KEY) !== "false");
+  const [podcastEnabled, setPodcastEnabled] = useState(() => localStorage.getItem(PODCAST_ENABLED_KEY) === "true");
   const [betaEnabled, setBetaEnabled] = useState(() => localStorage.getItem(BETA_ENABLED_KEY) === "true");
   const [singleLoop, setSingleLoop] = useState(false);
   const [isCompactControls, setIsCompactControls] = useState(false);
