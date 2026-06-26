@@ -12,6 +12,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { Readable } from "node:stream";
 import crypto from "node:crypto";
 import OpenAI from "openai";
 import NeteaseCloudMusicApi from "NeteaseCloudMusicApi";
@@ -365,6 +366,26 @@ app.use(
 );
 app.use(express.json({ limit: "2mb" }));
 app.use("/media", express.static(generatedDir));
+app.get("/media/blob/*", async (req, res, next) => {
+  try {
+    const pathname = decodeURIComponent(String(req.params?.[0] || ""));
+    if (!pathname || pathname.includes("..")) {
+      res.status(404).end();
+      return;
+    }
+    const result = await get(pathname, { access: "private", useCache: true });
+    if (result.statusCode !== 200 || !result.stream) {
+      res.status(404).end();
+      return;
+    }
+    res.setHeader("Content-Type", result.blob.contentType || "audio/mpeg");
+    res.setHeader("Cache-Control", result.blob.cacheControl || "public, max-age=31536000, immutable");
+    if (result.blob.size) res.setHeader("Content-Length", String(result.blob.size));
+    Readable.fromWeb(result.stream).pipe(res);
+  } catch (error) {
+    next(error);
+  }
+});
 
 const defaultMemory = {
   profile: {
@@ -4377,12 +4398,23 @@ async function mixPodcast({ musicPath, voicePath }) {
 async function publishGeneratedFile(filePath, fileName) {
   if (process.env.BLOB_READ_WRITE_TOKEN) {
     const buffer = await readFile(filePath);
-    const blob = await put(`agentio/${fileName}`, buffer, {
-      access: "public",
-      contentType: "audio/mpeg",
-      addRandomSuffix: true
-    });
-    return blob.url;
+    const pathname = `agentio/${fileName}`;
+    try {
+      const blob = await put(pathname, buffer, {
+        access: "private",
+        contentType: "audio/mpeg",
+        addRandomSuffix: true
+      });
+      return `/media/blob/${encodeURIComponent(blob.pathname || pathname)}`;
+    } catch (error) {
+      if (!/private access|public access|configured with/i.test(error?.message || "")) throw error;
+      const blob = await put(pathname, buffer, {
+        access: "public",
+        contentType: "audio/mpeg",
+        addRandomSuffix: true
+      });
+      return blob.url;
+    }
   }
   return `/media/${fileName}`;
 }
