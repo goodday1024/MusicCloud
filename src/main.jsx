@@ -15,11 +15,9 @@ const PODCAST_CACHE_KEY = "caelumshao.podcastCache.v1";
 const RECENT_TRACKS_KEY = "caelumshao.recentTracks.v1";
 const PODCAST_CACHE_TTL = 24 * 60 * 60 * 1000;
 const ADMIN_PASSWORD_KEY = "caelumshao.adminPassword.v1";
-const ACCESS_GRANTED_KEY = "caelumshao.accessGranted.v1";
-const ACCESS_MODE_KEY = "caelumshao.accessMode.v1";
-const ACTIVATED_INVITE_KEY = "caelumshao.activatedInvite.v1";
 const ACCOUNT_TOKEN_KEY = "caelumshao.accountToken.v1";
 const DEVICE_ID_KEY = "caelumshao.deviceId.v1";
+const APP_VERSION_KEY = "caelumshao.appVersion.v1";
 const DEFAULT_ADMIN_PASSWORD = "admin123456";
 const RENDER_LIMITS = {
   low: { tracks: 360, dust: 3200, mist: 360 },
@@ -81,9 +79,9 @@ function normalizePath(pathname = "") {
   return trimmed || "/";
 }
 
-function readLibraryCache() {
+function readLibraryCache(accountId = "") {
   try {
-    const payload = JSON.parse(localStorage.getItem(LIBRARY_CACHE_KEY) || "{}");
+    const payload = JSON.parse(localStorage.getItem(accountScopedKey(LIBRARY_CACHE_KEY, accountId)) || "{}");
     const items = Array.isArray(payload) ? payload : Array.isArray(payload.items) ? payload.items : [];
     return {
       items,
@@ -135,25 +133,17 @@ function compactLibraryTrack(track = {}) {
   };
 }
 
-function writeLibraryCache(items = []) {
+function writeLibraryCache(items = [], accountId = "") {
   const payload = {
     updatedAt: new Date().toISOString(),
     items: items.map(compactLibraryTrack)
   };
   try {
-    localStorage.setItem(LIBRARY_CACHE_KEY, JSON.stringify(payload));
+    localStorage.setItem(accountScopedKey(LIBRARY_CACHE_KEY, accountId), JSON.stringify(payload));
   } catch (error) {
     console.warn("library cache write failed:", error?.message || error);
   }
   return payload;
-}
-
-function readAccessGranted() {
-  try {
-    return localStorage.getItem(ACCESS_GRANTED_KEY) === "true";
-  } catch (_error) {
-    return false;
-  }
 }
 
 function readDeviceId() {
@@ -168,20 +158,20 @@ function readDeviceId() {
   }
 }
 
+function clearLegacyAccessState() {
+  if (typeof window === "undefined") return;
+  const current = localStorage.getItem(APP_VERSION_KEY);
+  if (current === "2026-06-25-together") return;
+  localStorage.setItem(APP_VERSION_KEY, "2026-06-25-together");
+}
+
+clearLegacyAccessState();
+
 function defaultQualityMode() {
   if (typeof window === "undefined") return "low";
   const coarse = window.matchMedia?.("(pointer: coarse)")?.matches || false;
   const narrow = window.matchMedia?.("(max-width: 760px)")?.matches || false;
   return coarse || narrow ? "low" : "high";
-}
-
-function randomInviteCode(length = 10) {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let code = "";
-  for (let index = 0; index < length; index += 1) {
-    code += alphabet[Math.floor(Math.random() * alphabet.length)];
-  }
-  return `YS-${code}`;
 }
 
 function readAdminPassword() {
@@ -199,6 +189,14 @@ function readObjectCache(key) {
   } catch (_error) {
     return {};
   }
+}
+
+function betaPreferenceKey(userId = "") {
+  return `${BETA_ENABLED_KEY}:${String(userId || "guest")}`;
+}
+
+function accountScopedKey(baseKey, userId = "") {
+  return `${baseKey}:${String(userId || "guest")}`;
 }
 
 function writeObjectCache(key, value, maxEntries = 160) {
@@ -1717,17 +1715,17 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
 
 function App() {
   const isAdminRoute = normalizePath(window.location.pathname) === "/admin";
-  const [accessGranted, setAccessGranted] = useState(() => readAccessGranted());
-  const [accessMode, setAccessMode] = useState(() => localStorage.getItem(ACCESS_MODE_KEY) || "");
-  const [activatedInvite, setActivatedInvite] = useState(() => localStorage.getItem(ACTIVATED_INVITE_KEY) || "");
-  const [inviteInput, setInviteInput] = useState("");
+  const [accessGranted, setAccessGranted] = useState(() => localStorage.getItem("caelumshao.accessGranted.v1") === "true");
+  const [accessMode, setAccessMode] = useState(() => localStorage.getItem("caelumshao.accessMode.v1") || "");
+  const [activatedInvite, setActivatedInvite] = useState(() => localStorage.getItem("caelumshao.activatedInvite.v1") || "");
   const [accessMessage, setAccessMessage] = useState("");
-  const [adminUnlocked, setAdminUnlocked] = useState(false);
-  const [adminPasswordInput, setAdminPasswordInput] = useState("");
-  const [adminPassword, setAdminPassword] = useState(() => readAdminPassword());
+  const [inviteInput, setInviteInput] = useState("");
   const [inviteCodes, setInviteCodes] = useState([]);
   const [inviteDraft, setInviteDraft] = useState("");
   const [batchInviteCount, setBatchInviteCount] = useState(10);
+  const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [adminPasswordInput, setAdminPasswordInput] = useState("");
+  const [adminPassword, setAdminPassword] = useState(() => readAdminPassword());
   const [deviceId] = useState(() => readDeviceId());
   const [accountToken, setAccountToken] = useState(() => localStorage.getItem(ACCOUNT_TOKEN_KEY) || "");
   const [cloudUser, setCloudUser] = useState(null);
@@ -1737,8 +1735,13 @@ function App() {
   const [accountInvite, setAccountInvite] = useState("");
   const [neteaseState, setNeteaseState] = useState(null);
   const [qqMusicState, setQqMusicState] = useState(null);
-  const [libraryCacheMeta, setLibraryCacheMeta] = useState(() => readLibraryCache());
-  const [libraryTracks, setLibraryTracks] = useState(() => readLibraryCache().items);
+  const currentAccountId = cloudUser?.id || "";
+  const currentBetaKey = betaPreferenceKey(cloudUser?.id || "");
+  const savedTracksKey = accountScopedKey("agentio.savedTracks", currentAccountId);
+  const savedTrackItemsKey = accountScopedKey("agentio.savedTrackItems", currentAccountId);
+  const recentTracksKey = accountScopedKey(RECENT_TRACKS_KEY, currentAccountId);
+  const [libraryCacheMeta, setLibraryCacheMeta] = useState(() => readLibraryCache(currentAccountId));
+  const [libraryTracks, setLibraryTracks] = useState(() => readLibraryCache(currentAccountId).items);
   const [selectedTrack, setSelectedTrack] = useState(null);
   const [hoveredTrack, setHoveredTrack] = useState(null);
   const [trackQueue, setTrackQueue] = useState([]);
@@ -1766,34 +1769,86 @@ function App() {
   const [uiHidden, setUiHidden] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [collectionPanelOpen, setCollectionPanelOpen] = useState(false);
+  const [togetherPanelOpen, setTogetherPanelOpen] = useState(false);
   const [podcastEnabled, setPodcastEnabled] = useState(() => localStorage.getItem(PODCAST_ENABLED_KEY) === "true");
-  const [betaEnabled, setBetaEnabled] = useState(() => localStorage.getItem(BETA_ENABLED_KEY) === "true");
+  const [betaEnabled, setBetaEnabled] = useState(false);
   const [singleLoop, setSingleLoop] = useState(false);
   const [isCompactControls, setIsCompactControls] = useState(false);
   const [panelOpen, setPanelOpen] = useState(true);
   const [earthSelection, setEarthSelection] = useState(null);
+  const [togetherRoom, setTogetherRoom] = useState(null);
+  const [togetherMessages, setTogetherMessages] = useState([]);
+  const [togetherTracks, setTogetherTracks] = useState([]);
+  const [togetherDraft, setTogetherDraft] = useState("");
+  const [togetherRoomName, setTogetherRoomName] = useState("");
+  const [togetherRoomCode, setTogetherRoomCode] = useState("");
   const earthSelectionKey = earthSelection ? trackKey(earthSelection) : "";
   const [savedKeys, setSavedKeys] = useState(() => {
     try {
-      return new Set(JSON.parse(localStorage.getItem("agentio.savedTracks") || "[]"));
+      return new Set(JSON.parse(localStorage.getItem(accountScopedKey("agentio.savedTracks", "guest")) || "[]"));
     } catch (_error) {
       return new Set();
     }
   });
   const [savedTrackItems, setSavedTrackItems] = useState(() => {
     try {
-      return JSON.parse(localStorage.getItem("agentio.savedTrackItems") || "{}");
+      return JSON.parse(localStorage.getItem(accountScopedKey("agentio.savedTrackItems", "guest")) || "{}");
     } catch (_error) {
       return {};
     }
   });
+  const betaInviteEnabled = accessGranted && accessMode === "invite";
+  useEffect(() => {
+    const stored = localStorage.getItem(currentBetaKey);
+    const accountBeta = Boolean(cloudUser?.betaAccess);
+    const next = accountBeta || stored === "true" || betaInviteEnabled;
+    setBetaEnabled(next);
+    if (!accountBeta && stored === "true" && !betaInviteEnabled) {
+      localStorage.removeItem(currentBetaKey);
+      setBetaEnabled(false);
+    }
+  }, [betaInviteEnabled, currentBetaKey, cloudUser?.betaAccess]);
+  useEffect(() => {
+    const storedInvite = localStorage.getItem("caelumshao.activatedInvite.v1") || "";
+    if ((cloudUser?.betaAccess || betaInviteEnabled) && storedInvite && accessGranted && accessMode === "invite") return;
+    void (async () => {
+      const response = await fetch(`/api/invites/activation?deviceId=${encodeURIComponent(deviceId)}`);
+      const data = await readJsonResponse(response);
+      if (!response.ok || !data?.activation?.code) return;
+      const code = String(data.activation.code || "").trim();
+      if (!code) return;
+      setAccessGranted(true);
+      setAccessMode("invite");
+      setActivatedInvite(code);
+      setBetaEnabled(true);
+      localStorage.setItem("caelumshao.accessGranted.v1", "true");
+      localStorage.setItem("caelumshao.accessMode.v1", "invite");
+      localStorage.setItem("caelumshao.activatedInvite.v1", code);
+      localStorage.setItem(betaPreferenceKey(cloudUser?.id || "guest"), "true");
+    })().catch(() => null);
+  }, [accessGranted, accessMode, betaInviteEnabled, cloudUser?.betaAccess, deviceId]);
   const [recentTracks, setRecentTracks] = useState(() => {
     try {
-      return JSON.parse(localStorage.getItem(RECENT_TRACKS_KEY) || "[]");
+      return JSON.parse(localStorage.getItem(accountScopedKey(RECENT_TRACKS_KEY, "guest")) || "[]");
     } catch (_error) {
       return [];
     }
   });
+  useEffect(() => {
+    const nextSavedKeys = new Set(JSON.parse(localStorage.getItem(savedTracksKey) || "[]"));
+    const nextSavedItems = JSON.parse(localStorage.getItem(savedTrackItemsKey) || "{}");
+    const nextRecentTracks = JSON.parse(localStorage.getItem(recentTracksKey) || "[]");
+    setSavedKeys(nextSavedKeys);
+    setSavedTrackItems(nextSavedItems);
+    setRecentTracks(nextRecentTracks);
+  }, [savedTrackItemsKey, savedTracksKey, recentTracksKey]);
+  useEffect(() => {
+    const cached = readLibraryCache(currentAccountId);
+    setLibraryCacheMeta(cached);
+    setLibraryTracks(cached.items);
+    setSelectedTrack(null);
+    setHoveredTrack(null);
+  }, [currentAccountId]);
   const [toast, setToast] = useState("");
   const [captureOrb, setCaptureOrb] = useState(null);
   const [jumpTrack, setJumpTrack] = useState(null);
@@ -1824,9 +1879,13 @@ function App() {
   const lyricsCacheRef = useRef(readObjectCache(LYRICS_CACHE_KEY));
   const podcastCacheRef = useRef(readObjectCache(PODCAST_CACHE_KEY));
   const prefetchingRef = useRef(new Set());
+  const togetherPlaybackVersionRef = useRef(0);
+  const suppressTogetherPublishRef = useRef(false);
+  const suppressPlaybackStateRef = useRef(false);
+  const lastPlaybackPublishRef = useRef(0);
 
-  const isNeteaseLoggedIn = Boolean(neteaseState?.loggedIn && (neteaseState?.uid || neteaseState?.profile?.userId || neteaseState?.profile?.nickname));
-  const isQqMusicLoggedIn = Boolean(qqMusicState?.loggedIn && (qqMusicState?.uin || qqMusicState?.profile?.nick || qqMusicState?.profile?.creator?.hostname || qqMusicState?.provider === "QQMusicApi1"));
+  const isNeteaseLoggedIn = Boolean(neteaseState?.loggedIn && (neteaseState?.uid || neteaseState?.profile?.userId || neteaseState?.profile?.nickname || neteaseState?.cookies?.length));
+  const isQqMusicLoggedIn = Boolean(qqMusicState?.loggedIn && (qqMusicState?.uin || qqMusicState?.profile?.nick || qqMusicState?.profile?.creator?.hostname || qqMusicState?.provider === "QQMusicApi1" || qqMusicState?.cookies?.length));
   const isLoggedIn = isNeteaseLoggedIn || isQqMusicLoggedIn;
   const accountLabel = isNeteaseLoggedIn && isQqMusicLoggedIn
     ? "已登录"
@@ -1914,7 +1973,27 @@ function App() {
           </form>
         ) : (
           <>
-            <form className="admin-form" onSubmit={saveAdminSettings}>
+            <form className="admin-form" onSubmit={(event) => {
+              event.preventDefault();
+              const nextInvite = inviteDraft.trim();
+              if (!nextInvite) {
+                setAccessMessage("邀请码不能为空");
+                return;
+              }
+              void (async () => {
+                const nextCodes = [...new Set([nextInvite, ...inviteCodes])];
+                const response = await fetch("/api/invites", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ codes: nextCodes })
+                });
+                const data = await readJsonResponse(response);
+                if (!response.ok) throw new Error(data.error || "邀请码保存失败");
+                setInviteCodes(Array.isArray(data.codes) ? data.codes.map((code) => String(code || "").trim()).filter(Boolean) : nextCodes);
+                setInviteDraft("");
+                setAccessMessage("邀请码已保存");
+              })().catch((error) => setAccessMessage(error.message || "邀请码保存失败"));
+            }}>
               <label>
                 <span>单个邀请码</span>
                 <input value={inviteDraft} onChange={(event) => setInviteDraft(event.target.value)} placeholder="输入新的邀请码" />
@@ -1926,13 +2005,12 @@ function App() {
                   navigator.clipboard?.writeText(inviteCodes.join("\n")).catch(() => null);
                   setAccessMessage("已复制全部邀请码");
                 }}>复制全部</button>
-                <button type="button" onClick={() => refreshInviteCodes().catch((error) => setAccessMessage(error.message || "邀请码刷新失败"))}>刷新列表</button>
               </div>
             </form>
             <form className="admin-form" onSubmit={(event) => {
               event.preventDefault();
               const count = Math.max(1, Math.min(200, Number(batchInviteCount) || 0));
-              const generated = Array.from({ length: count }, () => randomInviteCode());
+              const generated = Array.from({ length: count }, () => `YS-${Math.random().toString(36).slice(2, 10).toUpperCase()}`);
               void (async () => {
                 const nextCodes = [...new Set([...generated, ...inviteCodes])];
                 const response = await fetch("/api/invites", {
@@ -1942,7 +2020,7 @@ function App() {
                 });
                 const data = await readJsonResponse(response);
                 if (!response.ok) throw new Error(data.error || "邀请码批量保存失败");
-                setInviteCodes(Array.isArray(data.codes) ? data.codes : nextCodes);
+                setInviteCodes(Array.isArray(data.codes) ? data.codes.map((code) => String(code || "").trim()).filter(Boolean) : nextCodes);
                 setInviteDraft("");
                 setAccessMessage(`已批量生成 ${generated.length} 个邀请码`);
               })().catch((error) => setAccessMessage(error.message || "邀请码批量保存失败"));
@@ -1961,7 +2039,7 @@ function App() {
               <div className="admin-row">
                 <button type="submit">一键生成</button>
                 <button type="button" onClick={() => {
-                  const generated = Array.from({ length: 20 }, () => randomInviteCode());
+                  const generated = Array.from({ length: 20 }, () => `YS-${Math.random().toString(36).slice(2, 10).toUpperCase()}`);
                   void (async () => {
                     const nextCodes = [...new Set([...generated, ...inviteCodes])];
                     const response = await fetch("/api/invites", {
@@ -1971,7 +2049,7 @@ function App() {
                     });
                     const data = await readJsonResponse(response);
                     if (!response.ok) throw new Error(data.error || "邀请码保存失败");
-                    setInviteCodes(Array.isArray(data.codes) ? data.codes : nextCodes);
+                    setInviteCodes(Array.isArray(data.codes) ? data.codes.map((code) => String(code || "").trim()).filter(Boolean) : nextCodes);
                     setAccessMessage("已快速生成 20 个邀请码");
                   })().catch((error) => setAccessMessage(error.message || "邀请码保存失败"));
                 }}>生成 20 个</button>
@@ -2027,22 +2105,13 @@ function App() {
   );
 
   useEffect(() => {
-    localStorage.setItem(ACCESS_GRANTED_KEY, accessGranted ? "true" : "false");
-  }, [accessGranted]);
-
-  useEffect(() => {
-    if (accessMode) localStorage.setItem(ACCESS_MODE_KEY, accessMode);
-    else localStorage.removeItem(ACCESS_MODE_KEY);
-  }, [accessMode]);
-
-  useEffect(() => {
-    if (activatedInvite) localStorage.setItem(ACTIVATED_INVITE_KEY, activatedInvite);
-    else localStorage.removeItem(ACTIVATED_INVITE_KEY);
-  }, [activatedInvite]);
-
-  useEffect(() => {
     localStorage.setItem(ADMIN_PASSWORD_KEY, adminPassword);
   }, [adminPassword]);
+
+  useEffect(() => {
+    if (!isAdminRoute || adminUnlocked) return;
+    void refreshInviteCodes().catch(() => setInviteCodes([]));
+  }, [adminUnlocked, isAdminRoute]);
 
   useEffect(() => {
     lyricSegmentsRef.current = lyricSegments;
@@ -2078,6 +2147,19 @@ function App() {
     return source.filter((item) => item && !item.artistCenter && !item.placeholder);
   }
 
+  function accountHeaders() {
+    return accountToken ? { Authorization: `Bearer ${accountToken}` } : {};
+  }
+
+  async function refreshInviteCodes() {
+    const response = await fetch("/api/invites");
+    const data = await readJsonResponse(response);
+    if (!response.ok) throw new Error(data.error || "邀请码读取失败");
+    const codes = Array.isArray(data.codes) ? data.codes.map((code) => String(code || "").trim()).filter(Boolean) : [];
+    setInviteCodes(codes);
+    return codes;
+  }
+
   function submitInviteCode(event) {
     event?.preventDefault?.();
     const trimmed = inviteInput.trim();
@@ -2093,17 +2175,20 @@ function App() {
       });
       const data = await readJsonResponse(response);
       if (!response.ok) throw new Error(data.error || "邀请码不正确或已使用");
+      if (data.user) setCloudUser(data.user);
       setAccessGranted(true);
       setAccessMode("invite");
       setActivatedInvite(trimmed);
-      setAccessMessage("邀请码已通过");
+      setBetaEnabled(true);
+      localStorage.setItem("caelumshao.accessGranted.v1", "true");
+      localStorage.setItem("caelumshao.accessMode.v1", "invite");
+      localStorage.setItem("caelumshao.activatedInvite.v1", trimmed);
+      localStorage.setItem(betaPreferenceKey("guest"), "true");
+      if (data.user?.id) localStorage.setItem(betaPreferenceKey(data.user.id), "true");
+      if (!data.user?.id) localStorage.setItem("caelumshao.betaDeviceInvite.v1", trimmed);
+      setAccessMessage("内测权限已开启");
       setInviteInput("");
-      await refreshInviteCodes().catch(() => null);
     })().catch((error) => setAccessMessage(error.message || "邀请码不正确或已使用"));
-  }
-
-  function accountHeaders() {
-    return accountToken ? { Authorization: `Bearer ${accountToken}` } : {};
   }
 
   function applyAccountPayload(data = {}) {
@@ -2115,18 +2200,29 @@ function App() {
       setCloudUser(data.user);
       setAccessGranted(true);
       setAccessMode("account");
-      localStorage.setItem(ACCESS_GRANTED_KEY, "true");
+      const nextBeta = Boolean(data.user.betaAccess);
+      setBetaEnabled(nextBeta);
+      if (data.user.id && currentAccountId && data.user.id !== currentAccountId) {
+        setSavedKeys(new Set());
+        setSavedTrackItems({});
+        setRecentTracks([]);
+      }
+      if (data.user.id) {
+        const key = betaPreferenceKey(data.user.id);
+        if (nextBeta) localStorage.setItem(key, "true");
+        else localStorage.removeItem(key);
+      }
     }
     if (Array.isArray(data.savedTracks)) {
       const nextItems = Object.fromEntries(data.savedTracks.map((track) => [track.key || trackKey(track), track]));
       setSavedTrackItems(nextItems);
       setSavedKeys(new Set(Object.keys(nextItems)));
-      localStorage.setItem("agentio.savedTrackItems", JSON.stringify(nextItems));
-      localStorage.setItem("agentio.savedTracks", JSON.stringify(Object.keys(nextItems)));
+      localStorage.setItem(savedTrackItemsKey, JSON.stringify(nextItems));
+      localStorage.setItem(savedTracksKey, JSON.stringify(Object.keys(nextItems)));
     }
     if (Array.isArray(data.history)) {
       setRecentTracks(data.history);
-      localStorage.setItem(RECENT_TRACKS_KEY, JSON.stringify(data.history.slice(0, 500)));
+      localStorage.setItem(recentTracksKey, JSON.stringify(data.history.slice(0, 500)));
     }
   }
 
@@ -2140,7 +2236,7 @@ function App() {
         body: JSON.stringify({
           username: accountUsername,
           password: accountPassword,
-          inviteCode: accountMode === "register" ? (accountInvite.trim() || activatedInvite) : accountInvite,
+          inviteCode: accountMode === "register" ? accountInvite : "",
           deviceId
         })
       });
@@ -2149,6 +2245,9 @@ function App() {
       applyAccountPayload(data);
       setAccountPassword("");
       setAccountInvite("");
+      setAccessMessage("");
+      setAccessGranted(false);
+      setAccessMode("");
       setAccessMessage(accountMode === "register" ? "云韶账号已注册并激活" : "云韶账号已登录");
     } catch (error) {
       setAccessMessage(error.message || "云韶账号请求失败");
@@ -2166,12 +2265,11 @@ function App() {
       localStorage.removeItem(ACCOUNT_TOKEN_KEY);
       setAccountToken("");
       setCloudUser(null);
-      if (accessMode === "account") {
-        setAccessGranted(false);
-        setAccessMode("");
-        setActivatedInvite("");
-        setAccessMessage("云韶账号登录已失效，请重新登录");
-      }
+      setAccessGranted(false);
+      setAccessMode("");
+      setActivatedInvite("");
+      setBetaEnabled(false);
+      setAccessMessage("云韶账号登录已失效，请重新登录");
     }
   }
 
@@ -2215,13 +2313,167 @@ function App() {
       setCloudUser(data.user || cloudUser);
       if (Array.isArray(data.items) && data.items.length) {
         setLibraryTracks(data.items);
-        setLibraryCacheMeta(writeLibraryCache(data.items));
+        setLibraryCacheMeta(writeLibraryCache(data.items, currentAccountId));
       }
       flash(`云韶账号已同步 ${data.items?.length || 0} 首`);
     } catch (error) {
       flash(error.message || "同步失败");
     } finally {
       setIsLibraryLoading(false);
+    }
+  }
+
+  async function refreshTogetherRoom() {
+    if (!accountToken) return;
+    try {
+      const response = await fetch("/api/account/together", { headers: accountHeaders() });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "一起听状态读取失败");
+      setTogetherRoom(data.room || null);
+      setTogetherMessages(Array.isArray(data.messages) ? data.messages : []);
+      setTogetherTracks(Array.isArray(data.tracks) ? data.tracks : []);
+      const version = Number(data.playbackVersion || 0);
+      const remoteTrack = data.nowPlaying?.track || null;
+      const remoteUserId = data.nowPlaying?.userId || "";
+      if (remoteTrack && version && version > togetherPlaybackVersionRef.current && remoteUserId !== cloudUser?.id) {
+        togetherPlaybackVersionRef.current = version;
+        const remoteUpdatedAt = Date.parse(data.nowPlaying?.updatedAt || data.nowPlaying?.startedAt || "");
+        const drift = data.nowPlaying?.playing && Number.isFinite(remoteUpdatedAt) ? Math.max(0, (Date.now() - remoteUpdatedAt) / 1000) : 0;
+        const remoteTime = Math.max(0, Number(data.nowPlaying?.currentTime || 0) + drift);
+        const sameTrack = currentTrackRef.current && trackKey(currentTrackRef.current) === trackKey(remoteTrack);
+        if (!sameTrack) await playTrackFromUi(remoteTrack, { focus: false, fromTogether: true });
+        window.setTimeout(() => {
+          const audio = audioRef.current;
+          if (!audio) return;
+          suppressPlaybackStateRef.current = true;
+          if (Number.isFinite(remoteTime) && Math.abs((audio.currentTime || 0) - remoteTime) > 1.2) audio.currentTime = remoteTime;
+          if (data.nowPlaying?.playing) audio.play().catch(() => null);
+          else audio.pause();
+          window.setTimeout(() => {
+            suppressPlaybackStateRef.current = false;
+          }, 700);
+        }, 500);
+        window.setTimeout(() => {
+          suppressTogetherPublishRef.current = false;
+        }, 5000);
+      } else if (version > togetherPlaybackVersionRef.current) {
+        togetherPlaybackVersionRef.current = version;
+      }
+    } catch (error) {
+      flash(error.message || "一起听状态读取失败");
+    }
+  }
+
+  async function publishTogetherPlaybackState({ playing = isPlaying, currentTime = audioRef.current?.currentTime || 0 } = {}) {
+    if (!accountToken || !togetherRoom || suppressTogetherPublishRef.current || suppressPlaybackStateRef.current || !currentTrackRef.current) return;
+    const now = Date.now();
+    if (now - lastPlaybackPublishRef.current < 850) return;
+    lastPlaybackPublishRef.current = now;
+    try {
+      const response = await fetch("/api/account/together/playback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...accountHeaders() },
+        body: JSON.stringify({ playing, currentTime })
+      });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "一起听进度同步失败");
+      togetherPlaybackVersionRef.current = Number(data.playbackVersion || togetherPlaybackVersionRef.current);
+    } catch (error) {
+      console.warn("publish together playback failed:", error?.message || error);
+    }
+  }
+
+  async function createTogetherRoom() {
+    if (!accountToken) return;
+    try {
+      const response = await fetch("/api/account/together/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...accountHeaders() },
+        body: JSON.stringify({ name: togetherRoomName || `${cloudUser?.username || "云韶"} 的一起听` })
+      });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "创建一起听失败");
+      setTogetherRoom(data.room || null);
+      flash("一起听房间已创建");
+      await refreshTogetherRoom();
+    } catch (error) {
+      flash(error.message || "创建一起听失败");
+    }
+  }
+
+  async function joinTogetherRoom() {
+    if (!accountToken) return;
+    if (!togetherRoomCode.trim()) {
+      flash("请输入房间号");
+      return;
+    }
+    try {
+      const response = await fetch("/api/account/together/join", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...accountHeaders() },
+        body: JSON.stringify({ roomId: togetherRoomCode.trim() })
+      });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "加入一起听失败");
+      setTogetherRoom(data.room || null);
+      flash("已加入一起听");
+      await refreshTogetherRoom();
+    } catch (error) {
+      flash(error.message || "加入一起听失败");
+    }
+  }
+
+  async function sendTogetherMessage(event) {
+    event?.preventDefault?.();
+    if (!accountToken) return;
+    const content = togetherDraft.trim();
+    if (!content) return;
+    try {
+      const response = await fetch("/api/account/together/message", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...accountHeaders() },
+        body: JSON.stringify({ content })
+      });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "发送消息失败");
+      setTogetherMessages(Array.isArray(data.messages) ? data.messages : []);
+      setTogetherDraft("");
+    } catch (error) {
+      flash(error.message || "发送消息失败");
+    }
+  }
+
+  async function leaveTogetherRoom() {
+    if (!accountToken) return;
+    try {
+      const response = await fetch("/api/account/together/leave", { method: "POST", headers: accountHeaders() });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "退出房间失败");
+      setTogetherRoom(null);
+      setTogetherMessages([]);
+      setTogetherTracks([]);
+      togetherPlaybackVersionRef.current = 0;
+      flash(data.dissolved ? "房间已解散" : "已退出房间");
+    } catch (error) {
+      flash(error.message || "退出房间失败");
+    }
+  }
+
+  async function publishTogetherTrack(track) {
+    if (!accountToken || !togetherRoom || suppressTogetherPublishRef.current || !track) return;
+    try {
+      const response = await fetch("/api/account/together/track", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...accountHeaders() },
+        body: JSON.stringify({ track })
+      });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "一起听同步失败");
+      setTogetherRoom(data.room || togetherRoom);
+      if (Array.isArray(data.tracks)) setTogetherTracks(data.tracks);
+      togetherPlaybackVersionRef.current = Number(data.playbackVersion || togetherPlaybackVersionRef.current);
+    } catch (error) {
+      console.warn("publish together track failed:", error?.message || error);
     }
   }
 
@@ -2235,7 +2487,7 @@ function App() {
     };
     setRecentTracks((current) => {
       const next = [item, ...current.filter((entry) => (entry.key || trackKey(entry)) !== key)].slice(0, 500);
-      localStorage.setItem(RECENT_TRACKS_KEY, JSON.stringify(next));
+      localStorage.setItem(recentTracksKey, JSON.stringify(next));
       return next;
     });
     if (!accountToken) return;
@@ -2248,6 +2500,8 @@ function App() {
 
   function syncSavedTracks(nextItems) {
     if (!accountToken) return;
+    localStorage.setItem(savedTrackItemsKey, JSON.stringify(nextItems || {}));
+    localStorage.setItem(savedTracksKey, JSON.stringify(Object.keys(nextItems || {})));
     fetch("/api/account/saved", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...accountHeaders() },
@@ -2257,28 +2511,20 @@ function App() {
 
   function logoutCloudAccount() {
     fetch("/api/account/logout", { method: "POST", headers: accountHeaders() }).catch(() => null);
+    if (cloudUser?.id) localStorage.removeItem(betaPreferenceKey(cloudUser.id));
+    if (currentAccountId) {
+      localStorage.removeItem(savedTracksKey);
+      localStorage.removeItem(savedTrackItemsKey);
+      localStorage.removeItem(recentTracksKey);
+    }
     localStorage.removeItem(ACCOUNT_TOKEN_KEY);
     setAccountToken("");
     setCloudUser(null);
-    if (accessMode === "account") {
-      setAccessGranted(false);
-      setAccessMode("");
-      setActivatedInvite("");
-      setSettingsOpen(false);
-      setAccessMessage("已退出云韶账号，请重新激活或登录");
-    } else {
-      setAccessMode("invite");
-      flash("已退出云韶账号，当前设备激活仍有效");
-    }
-  }
-
-  async function refreshInviteCodes() {
-    const response = await fetch("/api/invites");
-    const data = await readJsonResponse(response);
-    if (!response.ok) throw new Error(data.error || "邀请码读取失败");
-    const codes = Array.isArray(data.codes) ? data.codes.map((code) => String(code || "").trim()).filter(Boolean) : [];
-    setInviteCodes(codes);
-    return codes;
+    setAccessGranted(false);
+    setAccessMode("");
+    setBetaEnabled(false);
+    setSettingsOpen(false);
+    flash("已退出云韶账号，请重新注册并登录");
   }
 
   function submitAdminPassword(event) {
@@ -2289,28 +2535,6 @@ function App() {
     }
     setAdminUnlocked(true);
     setAccessMessage("");
-  }
-
-  function saveAdminSettings(event) {
-    event?.preventDefault?.();
-    const nextInvite = inviteDraft.trim();
-    if (!nextInvite) {
-      setAccessMessage("邀请码不能为空");
-      return;
-    }
-    void (async () => {
-      const nextCodes = [...new Set([nextInvite, ...inviteCodes])];
-      const response = await fetch("/api/invites", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ codes: nextCodes })
-      });
-      const data = await readJsonResponse(response);
-      if (!response.ok) throw new Error(data.error || "邀请码保存失败");
-      setInviteCodes(Array.isArray(data.codes) ? data.codes.map((code) => String(code || "").trim()).filter(Boolean) : nextCodes);
-      setInviteDraft("");
-      setAccessMessage("邀请码已追加到文件");
-    })().catch((error) => setAccessMessage(error.message || "邀请码保存失败"));
   }
 
   function buildPlaybackQueue(track) {
@@ -2386,6 +2610,14 @@ function App() {
     return data;
   }
 
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      refreshNeteaseState().catch(() => null);
+      refreshQqMusicState().catch(() => null);
+    }, 12000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   async function loadNeteaseLibrary() {
     const response = await fetch("/api/netease/library/tracks");
     const data = await readJsonResponse(response);
@@ -2416,11 +2648,11 @@ function App() {
       const nextFingerprint = libraryFingerprint(merged);
       if (oldFingerprint !== nextFingerprint) {
         setLibraryTracks(merged);
-        setLibraryCacheMeta(writeLibraryCache(merged));
+        setLibraryCacheMeta(writeLibraryCache(merged, currentAccountId));
       }
       setMessage(background ? "" : `曲库已同步 ${merged.length} 首`);
     } else if (!libraryTracks.length) {
-      const cached = readLibraryCache();
+      const cached = readLibraryCache(currentAccountId);
       if (cached.items.length) {
         setLibraryTracks(annotateEarthTracks(cached.items));
         setLibraryCacheMeta(cached);
@@ -2438,9 +2670,26 @@ function App() {
   useEffect(() => {
     refreshNeteaseState().catch(() => setNeteaseState({ loggedIn: false }));
     refreshQqMusicState().catch(() => setQqMusicState({ loggedIn: false }));
-    refreshInviteCodes().catch(() => setInviteCodes([]));
     refreshCloudAccount();
   }, []);
+
+  useEffect(() => {
+    if (!isAdminRoute || !adminUnlocked) return undefined;
+    void refreshInviteCodes().catch(() => setInviteCodes([]));
+    const timer = window.setInterval(() => {
+      void refreshInviteCodes().catch(() => null);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [adminUnlocked, isAdminRoute]);
+
+  useEffect(() => {
+    if (!accountToken) return undefined;
+    void refreshTogetherRoom();
+    const timer = window.setInterval(() => {
+      void refreshTogetherRoom();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [accountToken]);
 
   useEffect(() => {
     const hash = window.location.hash || "";
@@ -2456,7 +2705,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const cached = readLibraryCache();
+    const cached = readLibraryCache(currentAccountId);
     if (cached.items.length && !libraryTracks.length) {
       setLibraryTracks(cached.items);
       setLibraryCacheMeta(cached);
@@ -2473,7 +2722,7 @@ function App() {
   }, [isNeteaseLoggedIn, isQqMusicLoggedIn]);
 
   useEffect(() => {
-    if (!loginOpen || loginMode !== "qr" || !neteaseState?.qrKey || isLoggedIn) return undefined;
+    if (!loginOpen || loginProvider !== "netease" || loginMode !== "qr" || !neteaseState?.qrKey || isNeteaseLoggedIn) return undefined;
     const timer = window.setInterval(async () => {
       try {
         const response = await fetch("/api/netease/login/check", {
@@ -2497,7 +2746,7 @@ function App() {
       }
     }, 1800);
     return () => window.clearInterval(timer);
-  }, [bindingMusicAccount, isLoggedIn, loginMode, loginOpen, neteaseState?.qrKey]);
+  }, [bindingMusicAccount, isNeteaseLoggedIn, loginMode, loginOpen, neteaseState?.qrKey]);
 
   useEffect(() => {
     if (!loginOpen || loginProvider !== "qq" || !isQqQrLoginMode(loginMode) || !qqMusicState?.qrSig || isQqMusicLoggedIn) return undefined;
@@ -2513,9 +2762,10 @@ function App() {
         const data = await readJsonResponse(response);
         if (!response.ok) throw new Error(data.error || "QQ 音乐二维码状态检查失败");
         setQqMusicState(data);
-        if (data.loggedIn && !data.needCookieImport) {
+        if (data.loggedIn || data.code === 0 || data.code === 200 || data.code === 803) {
           setLoginMessage(bindingMusicAccount ? "QQ 音乐登录成功，正在绑定到云韶账号" : "QQ 音乐登录成功，正在同步歌单");
           setLoginOpen(false);
+          setQqMusicState(data);
           await loadAllLibraries().catch(() => null);
           await finishMusicAccountBinding();
         } else if (data.qrAlternative === "wx") {
@@ -2543,7 +2793,8 @@ function App() {
 
   useEffect(() => {
     const onKeyDown = (event) => {
-      if (event.key.toLowerCase() === "h" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      const key = String(event.key || "").toLowerCase();
+      if (key === "h" && !event.metaKey && !event.ctrlKey && !event.altKey) {
         const tag = document.activeElement?.tagName?.toLowerCase();
         if (tag !== "input" && tag !== "textarea") setUiHidden((value) => !value);
       }
@@ -2561,10 +2812,14 @@ function App() {
     setIsPlaying(false);
 
     const onTime = () => setAudioTime(audio.currentTime || 0);
-    const onPlay = () => setIsPlaying(true);
+    const onPlay = () => {
+      setIsPlaying(true);
+      void publishTogetherPlaybackState({ playing: true, currentTime: audio.currentTime || 0 });
+    };
     const onPause = () => {
       if (singleLoop && audio.ended) return;
       setIsPlaying(false);
+      void publishTogetherPlaybackState({ playing: false, currentTime: audio.currentTime || 0 });
     };
     const onMeta = () => setAudioDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
     const onEnded = () => {
@@ -2624,15 +2879,23 @@ function App() {
   }, [podcastEnabled]);
 
   useEffect(() => {
-    localStorage.setItem(BETA_ENABLED_KEY, betaEnabled ? "true" : "false");
+    const key = currentBetaKey;
+    const hasPermission = Boolean(cloudUser?.betaAccess || betaInviteEnabled);
+    if (!hasPermission && betaEnabled) {
+      setBetaEnabled(false);
+      localStorage.removeItem(key);
+      return;
+    }
+    if (!hasPermission) {
+      localStorage.removeItem(key);
+      if (betaEnabled) setBetaEnabled(false);
+      return;
+    }
+    localStorage.setItem(key, betaEnabled ? "true" : "false");
     if (!betaEnabled && sceneMode === "earth") {
       setSceneMode("nebula");
     }
-  }, [betaEnabled, sceneMode]);
-
-  useEffect(() => {
-    if (!betaEnabled) setSceneMode((mode) => (mode === "earth" ? "nebula" : mode));
-  }, []);
+  }, [betaEnabled, betaInviteEnabled, currentBetaKey, sceneMode, cloudUser?.betaAccess]);
 
   function stopPodcastOverlay() {
     if (window.speechSynthesis) window.speechSynthesis.cancel();
@@ -2797,6 +3060,7 @@ function App() {
         queueRef.current = [...queue];
         setTrackQueue([...queue]);
         syncPlayHistory({ ...track, musicUrl: originalUrl });
+        void publishTogetherTrack({ ...track, musicUrl: originalUrl });
         void loadLyricsForTrack(track, token);
         void prefetchQueueTrack(index + 1);
         window.setTimeout(() => {
@@ -2851,6 +3115,7 @@ function App() {
     const next = Number(event.target.value);
     audio.currentTime = (next / 100) * audioDuration;
     setAudioTime(audio.currentTime);
+    void publishTogetherPlaybackState({ playing: !audio.paused, currentTime: audio.currentTime || 0 });
   }
 
   function flash(text) {
@@ -2945,6 +3210,29 @@ function App() {
       flash(error.message || "退出失败");
     } finally {
       setLoginBusy(false);
+    }
+  }
+
+  async function logoutCurrentMusicAccount() {
+    const tasks = [];
+    if (isNeteaseLoggedIn) tasks.push(logoutNetease());
+    if (isQqMusicLoggedIn) tasks.push(logoutQqMusic());
+    if (!tasks.length) {
+      flash("当前没有已登录的音乐账号");
+      return;
+    }
+    try {
+      await Promise.allSettled(tasks);
+      setBindingMusicAccount(false);
+      setLoginOpen(false);
+      setLoginProvider("netease");
+      setLoginMode("qr");
+      setLoginMessage("");
+      setNeteaseState((state) => (state ? { ...state, loggedIn: false, cookies: [], uid: "", profile: null, qrKey: "", qrImg: "" } : state));
+      setQqMusicState((state) => (state ? { ...state, loggedIn: false, cookies: [], uin: "", profile: null, qrSig: "", qrImg: "", qrStatus: "" } : state));
+      flash("已退出当前音乐账号");
+    } catch (error) {
+      flash(error.message || "退出音乐账号失败");
     }
   }
 
@@ -3061,15 +3349,12 @@ function App() {
 
   async function playTrackFromUi(track, options = {}) {
     if (!track) return;
+    if (options.fromTogether) suppressTogetherPublishRef.current = true;
     if (track.regionCenter) {
-      setEarthSelection(track);
-      setSceneMode("earth");
       setPanelOpen(true);
       setSelectedTrack(track);
       setHoveredTrack(track);
-      setDeepFocus(true);
-      setJumping(true);
-      flash(`已聚焦 ${track.title}`);
+      flash("地球内测已暂停");
       return;
     }
     const shouldFocus = options.focus !== false;
@@ -3165,6 +3450,12 @@ function App() {
   }
 
   function selectSceneMode(mode) {
+    if (mode === "earth") {
+      setSceneMode("nebula");
+      setEarthSelection(null);
+      flash("地球内测已暂停");
+      return;
+    }
     setSceneMode(mode);
     setPanelOpen(true);
     setEarthSelection((current) => (mode === "earth" ? current : null));
@@ -3312,8 +3603,8 @@ function App() {
     }
     setSavedKeys(next);
     setSavedTrackItems(nextItems);
-    localStorage.setItem("agentio.savedTracks", JSON.stringify([...next]));
-    localStorage.setItem("agentio.savedTrackItems", JSON.stringify(nextItems));
+    localStorage.setItem(savedTracksKey, JSON.stringify([...next]));
+    localStorage.setItem(savedTrackItemsKey, JSON.stringify(nextItems));
     syncSavedTracks(nextItems);
   }
 
@@ -3343,40 +3634,98 @@ function App() {
     }, 4300);
   }
 
+  const musicLoginPanel = !uiHidden && loginOpen && (
+    <section className="login-panel" role="dialog" aria-modal="true" aria-label="音乐平台登录">
+      <button className="panel-close" aria-label="关闭登录面板" type="button" onClick={() => {
+        setLoginOpen(false);
+        setBindingMusicAccount(false);
+      }}>×</button>
+      <div className="login-title">{bindingMusicAccount ? "绑定音乐账号" : loginProvider === "qq" ? "QQ 音乐登录" : "网易云登录"}</div>
+      {bindingMusicAccount && <div className="login-hint">请选择网易云或 QQ 音乐登录，成功后会绑定到当前云韶账号。</div>}
+      <div className="login-provider-tabs">
+        <button className={loginProvider === "netease" ? "on" : ""} type="button" onClick={() => openLoginPanel("qr")}>网易云</button>
+        <button className={loginProvider === "qq" ? "on" : ""} type="button" onClick={openQqMusicLoginPanel}>QQ 音乐</button>
+      </div>
+      {loginProvider === "qq" ? (
+        <>
+          <div className="login-tabs">
+            <button className={loginMode === "qq-qr" ? "on" : ""} type="button" onClick={showQqMusicQrPanel}>QQ 扫码</button>
+            <button className={loginMode === "qq-wx-qr" ? "on" : ""} type="button" onClick={showQqMusicWxQrPanel}>微信扫码</button>
+            <button className={loginMode === "qq-cookie" ? "on" : ""} type="button" onClick={() => setLoginMode("qq-cookie")}>网页导入</button>
+          </div>
+          {isQqQrLoginMode(loginMode) ? (
+            <div className="qr-login">
+              <div className="qr-box">
+                {qqMusicState?.qrImg ? <img src={qqMusicState.qrImg} alt="QQ 音乐登录二维码" /> : <span>{loginBusy ? "生成中" : "二维码生成中"}</span>}
+              </div>
+              {qqMusicState?.qrImg && (
+                <button className="login-action" type="button" onClick={() => startQqMusicQrLogin()} disabled={loginBusy}>
+                  刷新二维码
+                </button>
+              )}
+            </div>
+          ) : (
+            <form className="phone-login qq-cookie-login" onSubmit={loginWithQqCookie}>
+              <button className="login-action" type="button" onClick={copyQqMusicImportScript} disabled={loginBusy}>复制 QQ 网页自动导入脚本</button>
+              <a className="qq-open-link" href="https://y.qq.com" target="_blank" rel="noreferrer">打开 QQ 音乐网页版</a>
+              <textarea value={qqCookie} onChange={(event) => setQqCookie(event.target.value)} placeholder="也可以手动粘贴 https://y.qq.com 登录后的 Cookie，例如 uin=...; qm_keyst=...; qqmusic_key=..." />
+              <button className="login-action" type="submit" disabled={loginBusy}>登录并同步 QQ 歌单</button>
+            </form>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="login-tabs">
+            <button className={loginMode === "qr" ? "on" : ""} type="button" onClick={() => openLoginPanel("qr")}>扫码</button>
+            <button className={loginMode === "phone" ? "on" : ""} type="button" onClick={() => setLoginMode("phone")}>手机验证码</button>
+          </div>
+          {loginMode === "qr" ? (
+            <div className="qr-login">
+              <div className="qr-box">
+                {neteaseState?.qrImg ? <img src={neteaseState.qrImg} alt="网易云登录二维码" /> : <span>{loginBusy ? "生成中" : "二维码生成中"}</span>}
+              </div>
+              {neteaseState?.qrImg && (
+                <button className="login-action" type="button" onClick={() => openLoginPanel("qr")} disabled={loginBusy}>
+                  刷新二维码
+                </button>
+              )}
+            </div>
+          ) : (
+            <form className="phone-login" onSubmit={loginWithPhone}>
+              <input value={phone} onChange={(event) => setPhone(event.target.value)} inputMode="tel" placeholder="手机号码" />
+              <div className="captcha-row">
+                <input value={captcha} onChange={(event) => setCaptcha(event.target.value)} inputMode="numeric" placeholder="验证码" />
+                <button type="button" onClick={sendCaptcha} disabled={loginBusy}>发送验证码</button>
+              </div>
+              <button className="login-action" type="submit" disabled={loginBusy}>登录并同步歌单</button>
+            </form>
+          )}
+        </>
+      )}
+      <p className="login-message">{loginMessage || (loginProvider === "qq" ? "优先尝试扫码；如果腾讯没有返回音乐站 Cookie，请使用网页导入完成登录。" : "登录后会把你的网易云歌单变成星云中的歌曲点。")}</p>
+    </section>
+  );
+
   return (
     <main className="app cloud-stage">
-      {!accessGranted ? (
+      {!cloudUser ? (
         <section className="invite-gate">
           <div className="invite-card">
             <div className="invite-brand">
               <div className="title">{BRAND_CN} <span className="title-en">{BRAND_EN}</span></div>
-              <p>内测访问</p>
-            </div>
-            <form className="invite-form" onSubmit={submitInviteCode}>
-              <input
-                value={inviteInput}
-                onChange={(event) => setInviteInput(event.target.value)}
-                placeholder="请输入邀请码"
-                autoComplete="one-time-code"
-              />
-              <button type="submit">进入</button>
-            </form>
-            <div className="invite-actions">
-              <span>{accessMessage || "仅邀请码可使用"}</span>
+              <p>云韶账号</p>
             </div>
             <form className="account-form" onSubmit={submitCloudAccount}>
               <div className="account-tabs">
-                <button type="button" className={accountMode === "login" ? "on" : ""} onClick={() => setAccountMode("login")}>云韶登录</button>
-                <button type="button" className={accountMode === "register" ? "on" : ""} onClick={() => setAccountMode("register")}>注册激活</button>
+                <button type="button" className={accountMode === "login" ? "on" : ""} onClick={() => setAccountMode("login")}>登录</button>
+                <button type="button" className={accountMode === "register" ? "on" : ""} onClick={() => setAccountMode("register")}>注册</button>
               </div>
-            <input value={accountUsername} onChange={(event) => setAccountUsername(event.target.value)} placeholder="云韶账号 / 邮箱" autoComplete="username" />
-            <input value={accountPassword} onChange={(event) => setAccountPassword(event.target.value)} placeholder="密码" type="password" autoComplete={accountMode === "register" ? "new-password" : "current-password"} />
-            {accountMode === "register" && (
-                <input value={accountInvite} onChange={(event) => setAccountInvite(event.target.value)} placeholder={activatedInvite ? "默认使用当前已激活的邀请码" : "注册邀请码"} autoComplete="one-time-code" />
-            )}
+              <input value={accountUsername} onChange={(event) => setAccountUsername(event.target.value)} placeholder="云韶账号 / 邮箱" autoComplete="username" />
+              <input value={accountPassword} onChange={(event) => setAccountPassword(event.target.value)} placeholder="密码" type="password" autoComplete={accountMode === "register" ? "new-password" : "current-password"} />
               <button type="submit">{accountMode === "register" ? "注册并进入" : "登录云韶账号"}</button>
-              <small>注册后可跨设备同步拾遗和最近播放；不注册时，邀请码只授权当前设备。</small>
+              <small>注册后可跨设备同步最近播放、拾遗和绑定的音乐账号。</small>
             </form>
+            {musicLoginPanel}
           </div>
         </section>
       ) : (
@@ -3392,15 +3741,6 @@ function App() {
         <div className="title">
           {BRAND_CN} <span className="title-en">{BRAND_EN}</span>
         </div>
-        {betaEnabled && (
-          <div className="seg">
-            {["nebula", "earth"].map((mode) => (
-              <button key={mode} className={`seg-btn ${sceneMode === mode ? "on" : ""}`} onClick={() => selectSceneMode(mode)} type="button">
-                {mode === "nebula" ? "星云" : "地球"}
-              </button>
-            ))}
-          </div>
-        )}
         {isCompactControls ? (
           <>
             <label className="select-shell">
@@ -3453,6 +3793,11 @@ function App() {
         <button className={`filter settings-trigger ${settingsOpen ? "on" : ""}`} type="button" onClick={() => setSettingsOpen((value) => !value)}>
           设置
         </button>
+        {betaEnabled && (
+          <button className={`filter ${togetherPanelOpen ? "on" : ""}`} type="button" onClick={() => setTogetherPanelOpen((value) => !value)}>
+            一起听
+          </button>
+        )}
         {cloudUser && <span className="stat">云韶 · {cloudUser.username}</span>}
         <span className="stat">{isLibraryLoading ? "同步曲库中" : `${playlistCount || 0} 歌单 · ${libraryTracks.length || 0} 首`}</span>
         <button className="ui-hide-btn" onClick={() => setUiHidden(true)} type="button">隐藏界面 · H</button>
@@ -3492,13 +3837,18 @@ function App() {
           <label className="setting-row">
             <span>
               <strong>内测模式</strong>
-              <small>{betaEnabled ? "会显示星云 / 地球切换，部分功能可能不稳定" : "隐藏星云 / 地球切换，使用更稳定的基础界面"}</small>
+              <small>{betaEnabled ? "会显示星云 / 地球切换、一起听等内测功能，部分功能可能不稳定" : "隐藏星云 / 地球切换和一起听，使用更稳定的基础界面"}</small>
             </span>
             <input
               type="checkbox"
               checked={betaEnabled}
               onChange={(event) => {
                 const next = event.target.checked;
+                if (next && !cloudUser?.betaAccess && !betaInviteEnabled) {
+                  flash("当前账号还没有内测权限，请先输入邀请码激活");
+                  event.target.checked = false;
+                  return;
+                }
                 setBetaEnabled(next);
                 if (next) flash("已开启内测模式，部分功能可能导致网页不稳定");
                 else flash("已关闭内测模式");
@@ -3506,24 +3856,83 @@ function App() {
               aria-label="开启或关闭内测模式"
             />
           </label>
+          {!betaEnabled && (
+            <div className="phone-login invite-activate">
+              <div className="cover-section-title">内测邀请码</div>
+              <div className="captcha-row">
+                <input value={inviteInput} onChange={(event) => setInviteInput(event.target.value)} placeholder="输入邀请码开启内测" />
+                <button type="button" onClick={submitInviteCode}>开启</button>
+              </div>
+            </div>
+          )}
           <div className="account-tools">
             <strong>{cloudUser ? `云韶账号：${cloudUser.username}` : "云韶账号未登录"}</strong>
             <span>{cloudUser ? `拾遗 ${cloudUser.savedCount || 0} · 最近播放 ${cloudUser.historyCount || 0}` : "登录后可跨设备同步拾遗、最近播放和绑定的音乐账号。"}</span>
             <div className="admin-row">
               <button type="button" onClick={() => setCollectionPanelOpen(true)}>最近播放 / 拾遗</button>
               <button type="button" onClick={bindCurrentMusicAccounts}>绑定当前音乐账号</button>
-              <button type="button" onClick={syncCloudLibrary}>手动同步歌单</button>
-              {!cloudUser && activatedInvite && (
-                <button type="button" onClick={() => {
-                  setAccountMode("register");
-                  setAccountInvite("");
-                  setAccessGranted(false);
-                  setAccessMessage("请创建云韶账号，系统会使用当前已激活的邀请码");
-                }}>绑定邀请码到新账号</button>
+              {(isNeteaseLoggedIn || isQqMusicLoggedIn) && (
+                <button type="button" onClick={logoutCurrentMusicAccount}>退出当前音乐账号</button>
               )}
+              <button type="button" onClick={syncCloudLibrary}>手动同步歌单</button>
               {cloudUser && (
                 <button type="button" onClick={logoutCloudAccount}>退出云韶</button>
               )}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {!uiHidden && togetherPanelOpen && accountToken && betaEnabled && (
+        <section className="together-panel" role="dialog" aria-modal="true" aria-label="一起听">
+          <button className="panel-close" aria-label="关闭一起听" type="button" onClick={() => setTogetherPanelOpen(false)}>×</button>
+          <div className="settings-title">一起听</div>
+          <div className="together-summary">
+            <span>{togetherRoom ? `房间 ${togetherRoom.id}` : "尚未创建房间"}</span>
+            <span>{togetherRoom ? `成员 ${[togetherRoom.ownerId, togetherRoom.mateId].filter(Boolean).length}/2` : "两人绑定后可一起听"}</span>
+            {togetherRoom && <button type="button" onClick={leaveTogetherRoom}>{togetherRoom.isOwner ? "解散房间" : "退出房间"}</button>}
+          </div>
+          <div className="together-grid">
+            <form className="together-block" onSubmit={(event) => {
+              event.preventDefault();
+              void createTogetherRoom();
+            }}>
+              <div className="cover-section-title">房间</div>
+              <input value={togetherRoomName} onChange={(event) => setTogetherRoomName(event.target.value)} placeholder="房间名称" />
+              <button type="submit">创建房间</button>
+            </form>
+            <form className="together-block" onSubmit={(event) => {
+              event.preventDefault();
+              void joinTogetherRoom();
+            }}>
+              <div className="cover-section-title">加入</div>
+              <input value={togetherRoomCode} onChange={(event) => setTogetherRoomCode(event.target.value)} placeholder="输入房间号" />
+              <button type="submit">加入房间</button>
+            </form>
+            <div className="together-block together-chat">
+              <div className="cover-section-title">在线聊天</div>
+              <div className="chat-list">
+                {togetherMessages.length ? togetherMessages.map((item) => (
+                  <div key={item.id} className="chat-item">
+                    <strong>{item.username || "匿名"}</strong>
+                    <span>{item.content}</span>
+                  </div>
+                )) : <div className="cover-empty">暂时没有聊天记录</div>}
+              </div>
+              <form className="together-chat-compose" onSubmit={sendTogetherMessage}>
+                <input value={togetherDraft} onChange={(event) => setTogetherDraft(event.target.value)} placeholder="发一句话..." />
+                <button type="submit">发送</button>
+              </form>
+            </div>
+          </div>
+          <div className="together-tracks">
+            <div className="cover-section-title">双方歌单并集</div>
+            <div className="cover-grid">
+              {togetherTracks.length ? togetherTracks.map((track, index) => (
+                <button key={`${trackKey(track)}-${index}`} className="cover-tile" type="button" onClick={() => playTrackFromUi(track)}>
+                  {track.cover ? <img src={track.cover} alt="" loading="lazy" /> : <span />}
+                </button>
+              )) : <div className="cover-empty">创建或加入房间后显示</div>}
             </div>
           </div>
         </section>
@@ -3646,77 +4055,7 @@ function App() {
         </div>
       )}
 
-      {!uiHidden && loginOpen && (
-        <section className="login-panel" role="dialog" aria-modal="true" aria-label="音乐平台登录">
-          <button className="panel-close" aria-label="关闭登录面板" type="button" onClick={() => {
-            setLoginOpen(false);
-            setBindingMusicAccount(false);
-          }}>×</button>
-          <div className="login-title">{bindingMusicAccount ? "绑定音乐账号" : loginProvider === "qq" ? "QQ 音乐登录" : "网易云登录"}</div>
-          {bindingMusicAccount && <div className="login-hint">请选择网易云或 QQ 音乐登录，成功后会绑定到当前云韶账号。</div>}
-          <div className="login-provider-tabs">
-            <button className={loginProvider === "netease" ? "on" : ""} type="button" onClick={() => openLoginPanel("qr")}>网易云</button>
-            <button className={loginProvider === "qq" ? "on" : ""} type="button" onClick={openQqMusicLoginPanel}>QQ 音乐</button>
-          </div>
-          {loginProvider === "qq" ? (
-            <>
-              <div className="login-tabs">
-                <button className={loginMode === "qq-qr" ? "on" : ""} type="button" onClick={showQqMusicQrPanel}>QQ 扫码</button>
-                <button className={loginMode === "qq-wx-qr" ? "on" : ""} type="button" onClick={showQqMusicWxQrPanel}>微信扫码</button>
-                <button className={loginMode === "qq-cookie" ? "on" : ""} type="button" onClick={() => setLoginMode("qq-cookie")}>网页导入</button>
-              </div>
-              {isQqQrLoginMode(loginMode) ? (
-                <div className="qr-login">
-                  <div className="qr-box">
-                    {qqMusicState?.qrImg ? <img src={qqMusicState.qrImg} alt="QQ 音乐登录二维码" /> : <span>{loginBusy ? "生成中" : "二维码生成中"}</span>}
-                  </div>
-                  {qqMusicState?.qrImg && (
-                    <button className="login-action" type="button" onClick={() => startQqMusicQrLogin()} disabled={loginBusy}>
-                      刷新二维码
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <form className="phone-login qq-cookie-login" onSubmit={loginWithQqCookie}>
-                  <button className="login-action" type="button" onClick={copyQqMusicImportScript} disabled={loginBusy}>复制 QQ 网页自动导入脚本</button>
-                  <a className="qq-open-link" href="https://y.qq.com" target="_blank" rel="noreferrer">打开 QQ 音乐网页版</a>
-                  <textarea value={qqCookie} onChange={(event) => setQqCookie(event.target.value)} placeholder="也可以手动粘贴 https://y.qq.com 登录后的 Cookie，例如 uin=...; qm_keyst=...; qqmusic_key=..." />
-                  <button className="login-action" type="submit" disabled={loginBusy}>登录并同步 QQ 歌单</button>
-                </form>
-              )}
-            </>
-          ) : (
-            <>
-              <div className="login-tabs">
-                <button className={loginMode === "qr" ? "on" : ""} type="button" onClick={() => openLoginPanel("qr")}>扫码</button>
-                <button className={loginMode === "phone" ? "on" : ""} type="button" onClick={() => setLoginMode("phone")}>手机验证码</button>
-              </div>
-              {loginMode === "qr" ? (
-                <div className="qr-login">
-                  <div className="qr-box">
-                    {neteaseState?.qrImg ? <img src={neteaseState.qrImg} alt="网易云登录二维码" /> : <span>{loginBusy ? "生成中" : "二维码生成中"}</span>}
-                  </div>
-                  {neteaseState?.qrImg && (
-                    <button className="login-action" type="button" onClick={() => openLoginPanel("qr")} disabled={loginBusy}>
-                      刷新二维码
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <form className="phone-login" onSubmit={loginWithPhone}>
-                  <input value={phone} onChange={(event) => setPhone(event.target.value)} inputMode="tel" placeholder="手机号码" />
-                  <div className="captcha-row">
-                    <input value={captcha} onChange={(event) => setCaptcha(event.target.value)} inputMode="numeric" placeholder="验证码" />
-                    <button type="button" onClick={sendCaptcha} disabled={loginBusy}>发送验证码</button>
-                  </div>
-                  <button className="login-action" type="submit" disabled={loginBusy}>登录并同步歌单</button>
-                </form>
-              )}
-            </>
-          )}
-          <p className="login-message">{loginMessage || (loginProvider === "qq" ? "优先尝试扫码；如果腾讯没有返回音乐站 Cookie，请使用网页导入完成登录。" : "登录后会把你的网易云歌单变成星云中的歌曲点。")}</p>
-        </section>
-      )}
+      {musicLoginPanel}
 
       {!uiHidden && panelOpen && displayTrack && (
         <section className="detail-panel poem-panel">

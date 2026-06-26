@@ -57,6 +57,7 @@ const neteaseStateFile = path.join(dataDir, "netease.json");
 const qqMusicStateFile = path.join(dataDir, "qqmusic.json");
 const inviteCodesFile = path.join(dataDir, "invite-codes.json");
 const usersFile = path.join(dataDir, "users.json");
+const roomsFile = path.join(dataDir, "together-rooms.json");
 const persistentJsonPrefix = process.env.AGENTIO_BLOB_STATE_PREFIX || "agentio/state";
 const qqMusicQrAppId = process.env.QQMUSIC_QR_APPID || "716027609";
 const qqMusicQrCallback = process.env.QQMUSIC_QR_CALLBACK || "https://y.qq.com/portal/profile.html";
@@ -577,12 +578,15 @@ async function writePersistentJson(filePath, blobName, payload) {
 
 function normalizeInviteEntry(entry = {}) {
   if (typeof entry === "string") {
-    return { code: entry.trim(), createdAt: "", usedAt: "" };
+    return { code: entry.trim(), createdAt: "", usedAt: "", deviceId: "", userId: "", purpose: "" };
   }
   return {
     code: String(entry.code || "").trim(),
     createdAt: String(entry.createdAt || ""),
-    usedAt: String(entry.usedAt || "")
+    usedAt: String(entry.usedAt || ""),
+    deviceId: String(entry.deviceId || ""),
+    userId: String(entry.userId || ""),
+    purpose: String(entry.purpose || "")
   };
 }
 
@@ -635,9 +639,100 @@ async function consumeInviteCode(code = "", meta = {}) {
   return { ok: true };
 }
 
+async function deactivateInviteAccessForOldVersion() {
+  const data = await readUsers();
+  let changed = false;
+  data.users.forEach((user) => {
+    if (user.activatedBy) {
+      delete user.activatedBy;
+      changed = true;
+    }
+    if (user.accessMode === "invite") {
+      user.accessMode = "";
+      changed = true;
+    }
+  });
+  if (Object.keys(data.sessions || {}).length) changed = true;
+  data.sessions = {};
+  if (changed) await saveUsers(data);
+  const emptyRooms = { rooms: [], memberships: {} };
+  await saveRooms(emptyRooms);
+  return true;
+}
+
+function compactRoom(room = {}) {
+  return {
+    id: room.id || "",
+    name: room.name || "",
+    ownerId: room.ownerId || "",
+    mateId: room.mateId || "",
+    createdAt: room.createdAt || "",
+    updatedAt: room.updatedAt || "",
+    trackIds: Array.isArray(room.trackIds) ? room.trackIds.slice(0, 500) : [],
+    lastMessageAt: room.lastMessageAt || "",
+    lastTrackAt: room.lastTrackAt || "",
+    playbackVersion: Number(room.playbackVersion || 0)
+  };
+}
+
+function compactRoomMessage(message = {}) {
+  return {
+    id: message.id || "",
+    roomId: message.roomId || "",
+    userId: message.userId || "",
+    username: message.username || "",
+    content: cleanText(message.content, 500),
+    createdAt: message.createdAt || new Date().toISOString()
+  };
+}
+
+function buildTogetherTracks(left = [], right = []) {
+  const map = new Map();
+  [...left, ...right].filter(Boolean).forEach((track, index) => {
+    const key = trackKeyForServer(track) || `${track.title || ""}:${track.artist || ""}:${index}`;
+    if (!map.has(key)) map.set(key, track);
+  });
+  return [...map.values()];
+}
+
+function publicRoom(room = {}, currentUserId = "") {
+  return {
+    ...compactRoom(room),
+    isOwner: room.ownerId === currentUserId,
+    isMate: room.mateId === currentUserId,
+    participants: [room.ownerId, room.mateId].filter(Boolean),
+    trackCount: Array.isArray(room.trackIds) ? room.trackIds.length : 0
+  };
+}
+
+async function getTogetherState(req) {
+  const { data, user } = await getUserByToken(req);
+  if (!user) return { data, user: null, room: null, messages: [], trackIds: [], tracks: [] };
+  const rooms = await readRooms();
+  const room = rooms.rooms.find((item) => item.ownerId === user.id || item.mateId === user.id || item.participants?.includes?.(user.id)) || null;
+  const messages = room?.messages || [];
+  const tracks = room?.tracks || [];
+  return { data, user, room, messages, tracks, rooms };
+}
+
 async function listUnusedInviteCodes() {
   const entries = await readInviteCodes();
   return entries.filter((entry) => !entry.usedAt).map((entry) => entry.code);
+}
+
+async function readInviteActivationByDevice(deviceId = "") {
+  const targetDeviceId = cleanText(deviceId, 120);
+  if (!targetDeviceId) return null;
+  const entries = await readInviteCodes();
+  const matched = entries.find((entry) => entry.deviceId === targetDeviceId && entry.usedAt && entry.purpose === "beta") || null;
+  if (!matched) return null;
+  return {
+    code: matched.code,
+    usedAt: matched.usedAt,
+    deviceId: matched.deviceId,
+    purpose: matched.purpose || "beta",
+    userId: matched.userId || ""
+  };
 }
 
 async function fetchNeteaseLibraryTracks(req) {
@@ -704,6 +799,13 @@ function normalizeUsers(payload = {}) {
   };
 }
 
+function normalizeRooms(payload = {}) {
+  return {
+    rooms: Array.isArray(payload.rooms) ? payload.rooms : [],
+    memberships: payload.memberships && typeof payload.memberships === "object" ? payload.memberships : {}
+  };
+}
+
 async function readUsers() {
   try {
     return normalizeUsers(await readPersistentJson(usersFile, "users.json", { users: [], sessions: {} }));
@@ -719,11 +821,29 @@ async function saveUsers(data) {
   return payload;
 }
 
+async function readRooms() {
+  try {
+    return normalizeRooms(await readPersistentJson(roomsFile, "together-rooms.json", { rooms: [], memberships: {} }));
+  } catch (error) {
+    console.warn("readRooms failed, using empty list:", error.message);
+    return { rooms: [], memberships: {} };
+  }
+}
+
+async function saveRooms(data) {
+  const payload = normalizeRooms(data);
+  await writePersistentJson(roomsFile, "together-rooms.json", { ...payload, updatedAt: new Date().toISOString() });
+  return payload;
+}
+
 function publicUser(user = {}) {
   return {
     id: user.id,
     username: user.username,
     createdAt: user.createdAt || "",
+    betaAccess: Boolean(user.betaAccess || user.activatedBy),
+    betaInviteCode: user.betaInviteCode || "",
+    betaDeviceIds: Array.isArray(user.betaDeviceIds) ? user.betaDeviceIds.slice(0, 20) : [],
     bound: {
       netease: Boolean(user.bindings?.netease?.loggedIn),
       qq: Boolean(user.bindings?.qq?.loggedIn)
@@ -945,12 +1065,15 @@ async function startNeteaseLogin() {
         const state = await readNeteaseState();
         const nextState = {
           ...state,
+          cookies: [],
+          uid: "",
+          profile: null,
           qrKey: key,
           qrImg: extractQrImage(createData.qrimg || ""),
           qrUrl: createData.qrurl || `https://music.163.com/login?codekey=${key}`,
           qrProvider: proxyBase,
           qrStatus: "",
-          loggedIn: Boolean(state.cookies?.length),
+          loggedIn: false,
           updatedAt: new Date().toISOString()
         };
         await saveNeteaseState(nextState);
@@ -974,6 +1097,9 @@ async function startNeteaseLogin() {
   const state = await readNeteaseState();
   const nextState = {
     ...state,
+    cookies: [],
+    uid: "",
+    profile: null,
     qrKey: key,
     qrImg: extractQrImage(qrImg),
     qrUrl,
@@ -1279,6 +1405,11 @@ async function startQQMusicQrLogin(preferIndex = 0, loginType = "qq") {
     const state = await readQQMusicState();
     const nextState = {
       ...state,
+      cookies: [],
+      uin: "",
+      profile: null,
+      api1Credential: null,
+      loggedIn: false,
       qrSig: payload.identifier || "",
       qrImg: payload.img || "",
       qrLoginType: safeLoginType,
@@ -1301,6 +1432,11 @@ async function startQQMusicQrLogin(preferIndex = 0, loginType = "qq") {
   const state = await readQQMusicState();
   const nextState = {
     ...state,
+    cookies: [],
+    uin: "",
+    profile: null,
+    api1Credential: null,
+    loggedIn: false,
     qrSig: qr.qrsig || "",
     qrImg: qr.image || "",
     qrConfigIndex: qqMusicQrConfigs.indexOf(config),
@@ -4333,12 +4469,37 @@ app.post("/api/invites/consume", async (req, res, next) => {
       res.status(400).json({ error: "缺少邀请码" });
       return;
     }
-    const result = await consumeInviteCode(code, { deviceId: req.body?.deviceId, purpose: "device" });
+    const { data, user } = await getUserByToken(req);
+    const result = await consumeInviteCode(code, {
+      deviceId: req.body?.deviceId,
+      purpose: "beta",
+      userId: user?.id || ""
+    });
     if (!result.ok) {
       res.status(404).json({ error: "邀请码不存在或已使用" });
       return;
     }
-    res.json({ ok: true });
+    const deviceId = cleanText(req.body?.deviceId, 120);
+    if (user) {
+      user.betaAccess = true;
+      user.betaInviteCode = code;
+      user.betaDeviceIds = Array.isArray(user.betaDeviceIds) ? user.betaDeviceIds : [];
+      if (deviceId && !user.betaDeviceIds.includes(deviceId)) user.betaDeviceIds.push(deviceId);
+      await saveUsers(data);
+    }
+    res.json({ ok: true, user: user ? publicUser(user) : null });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/invites/activation", async (req, res, next) => {
+  try {
+    const deviceId = String(req.query?.deviceId || "").trim();
+    const activation = await readInviteActivationByDevice(deviceId);
+    const { user } = await getUserByToken(req).catch(() => ({ user: null }));
+    const accountMatch = user && (user.betaAccess || (Array.isArray(user.betaDeviceIds) && deviceId && user.betaDeviceIds.includes(deviceId)));
+    res.json({ activation, accountMatch: Boolean(accountMatch) });
   } catch (error) {
     next(error);
   }
@@ -4348,7 +4509,6 @@ app.post("/api/account/register", async (req, res, next) => {
   try {
     const username = cleanText(req.body?.username, 64).toLowerCase();
     const password = String(req.body?.password || "");
-    const inviteCode = String(req.body?.inviteCode || "").trim();
     if (!/^[a-z0-9_@.-]{3,64}$/i.test(username)) {
       res.status(400).json({ error: "用户名至少 3 位，只能包含字母、数字、下划线、点、横线或邮箱符号" });
       return;
@@ -4362,11 +4522,6 @@ app.post("/api/account/register", async (req, res, next) => {
       res.status(409).json({ error: "该云韶账号已存在" });
       return;
     }
-    const consumed = await consumeInviteCode(inviteCode, { purpose: "account", userId: username, deviceId: req.body?.deviceId });
-    if (!consumed.ok) {
-      res.status(404).json({ error: "邀请码不存在或已使用" });
-      return;
-    }
     const passwordRecord = hashPassword(password);
     const user = {
       id: nanoid(12),
@@ -4374,7 +4529,8 @@ app.post("/api/account/register", async (req, res, next) => {
       passwordSalt: passwordRecord.salt,
       passwordHash: passwordRecord.hash,
       createdAt: new Date().toISOString(),
-      activatedBy: inviteCode,
+      betaAccess: false,
+      activatedBy: "",
       bindings: {},
       savedTracks: [],
       history: [],
@@ -4418,6 +4574,237 @@ app.get("/api/account/me", async (req, res, next) => {
       return;
     }
     res.json({ user: publicUser(user), savedTracks: user.savedTracks || [], history: user.history || [], syncedTracks: user.syncedTracks || [] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/account/together/create", async (req, res, next) => {
+  try {
+    const { data, user } = await getUserByToken(req);
+    if (!user) {
+      res.status(401).json({ error: "请先登录云韶账号" });
+      return;
+    }
+    const rooms = await readRooms();
+    const existing = rooms.rooms.find((room) => room.ownerId === user.id || room.mateId === user.id) || null;
+    if (existing) {
+      res.json({ room: publicRoom(existing, user.id), joined: true });
+      return;
+    }
+    const room = {
+      id: nanoid(10),
+      name: cleanText(req.body?.name, 48) || `${user.username} 的一起听`,
+      ownerId: user.id,
+      mateId: "",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [],
+      tracks: [],
+      nowPlaying: null,
+      playbackVersion: 0
+    };
+    rooms.rooms.push(room);
+    await saveRooms(rooms);
+    res.json({ room: publicRoom(room, user.id), joined: false });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/account/together/join", async (req, res, next) => {
+  try {
+    const { data, user } = await getUserByToken(req);
+    if (!user) {
+      res.status(401).json({ error: "请先登录云韶账号" });
+      return;
+    }
+    const roomId = String(req.body?.roomId || "").trim();
+    const rooms = await readRooms();
+    const room = rooms.rooms.find((item) => item.id === roomId) || null;
+    if (!room) {
+      res.status(404).json({ error: "房间不存在" });
+      return;
+    }
+    if (room.ownerId !== user.id && room.mateId && room.mateId !== user.id) {
+      res.status(409).json({ error: "房间已满" });
+      return;
+    }
+    room.mateId = room.ownerId === user.id ? room.mateId : user.id;
+    if (!room.ownerId) room.ownerId = user.id;
+    room.updatedAt = new Date().toISOString();
+    rooms.rooms = rooms.rooms.map((item) => item.id === room.id ? room : item);
+    await saveRooms(rooms);
+    res.json({ room: publicRoom(room, user.id), joined: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/account/together", async (req, res, next) => {
+  try {
+    const { user } = await getUserByToken(req);
+    if (!user) {
+      res.status(401).json({ error: "请先登录云韶账号" });
+      return;
+    }
+    const rooms = await readRooms();
+    const room = rooms.rooms.find((item) => item.ownerId === user.id || item.mateId === user.id) || null;
+    if (!room) {
+      res.json({ room: null, messages: [], tracks: [] });
+      return;
+    }
+    const trackIds = Array.isArray(room.trackIds) ? room.trackIds : [];
+    const me = await readUsers();
+    const owner = me.users.find((item) => item.id === room.ownerId) || null;
+    const mate = me.users.find((item) => item.id === room.mateId) || null;
+    const ownerTracks = owner?.syncedTracks?.length ? owner.syncedTracks : owner?.savedTracks || [];
+    const mateTracks = mate?.syncedTracks?.length ? mate.syncedTracks : mate?.savedTracks || [];
+    const tracks = buildTogetherTracks(ownerTracks, mateTracks);
+    res.json({ room: publicRoom(room, user.id), messages: room.messages || [], tracks, trackIds, nowPlaying: room.nowPlaying || null, playbackVersion: room.playbackVersion || 0 });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/account/together/message", async (req, res, next) => {
+  try {
+    const { user } = await getUserByToken(req);
+    if (!user) {
+      res.status(401).json({ error: "请先登录云韶账号" });
+      return;
+    }
+    const content = cleanText(req.body?.content, 500);
+    if (!content) {
+      res.status(400).json({ error: "消息不能为空" });
+      return;
+    }
+    const rooms = await readRooms();
+    const room = rooms.rooms.find((item) => item.ownerId === user.id || item.mateId === user.id) || null;
+    if (!room) {
+      res.status(404).json({ error: "请先创建或加入一起听房间" });
+      return;
+    }
+    room.messages = [...(room.messages || []), compactRoomMessage({
+      id: nanoid(10),
+      roomId: room.id,
+      userId: user.id,
+      username: user.username,
+      content,
+      createdAt: new Date().toISOString()
+    })].slice(-200);
+    room.updatedAt = new Date().toISOString();
+    room.lastMessageAt = room.updatedAt;
+    rooms.rooms = rooms.rooms.map((item) => item.id === room.id ? room : item);
+    await saveRooms(rooms);
+    res.json({ messages: room.messages });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/account/together/track", async (req, res, next) => {
+  try {
+    const { user } = await getUserByToken(req);
+    if (!user) {
+      res.status(401).json({ error: "请先登录云韶账号" });
+      return;
+    }
+    const track = req.body?.track || {};
+    const trackId = trackKeyForServer(track);
+    if (!trackId) {
+      res.status(400).json({ error: "歌曲信息不完整" });
+      return;
+    }
+    const rooms = await readRooms();
+    const room = rooms.rooms.find((item) => item.ownerId === user.id || item.mateId === user.id) || null;
+    if (!room) {
+      res.status(404).json({ error: "请先创建或加入一起听房间" });
+      return;
+    }
+    room.trackIds = Array.from(new Set([...(room.trackIds || []), trackId])).slice(0, 1000);
+    room.tracks = buildTogetherTracks(room.tracks || [], [track]);
+    room.nowPlaying = {
+      track,
+      trackId,
+      userId: user.id,
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      currentTime: 0,
+      playing: true
+    };
+    room.playbackVersion = Number(room.playbackVersion || 0) + 1;
+    room.updatedAt = new Date().toISOString();
+    room.lastTrackAt = room.updatedAt;
+    rooms.rooms = rooms.rooms.map((item) => item.id === room.id ? room : item);
+    await saveRooms(rooms);
+    res.json({ room: publicRoom(room, user.id), tracks: room.tracks || [], nowPlaying: room.nowPlaying, playbackVersion: room.playbackVersion });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/account/together/playback", async (req, res, next) => {
+  try {
+    const { user } = await getUserByToken(req);
+    if (!user) {
+      res.status(401).json({ error: "请先登录云韶账号" });
+      return;
+    }
+    const rooms = await readRooms();
+    const room = rooms.rooms.find((item) => item.ownerId === user.id || item.mateId === user.id) || null;
+    if (!room) {
+      res.status(404).json({ error: "请先创建或加入一起听房间" });
+      return;
+    }
+    const nowPlaying = room.nowPlaying || {};
+    if (!nowPlaying.track) {
+      res.status(400).json({ error: "房间还没有正在播放的歌曲" });
+      return;
+    }
+    const currentTime = Math.max(0, Number(req.body?.currentTime || 0));
+    const playing = Boolean(req.body?.playing);
+    room.nowPlaying = {
+      ...nowPlaying,
+      userId: user.id,
+      currentTime,
+      playing,
+      updatedAt: new Date().toISOString()
+    };
+    room.playbackVersion = Number(room.playbackVersion || 0) + 1;
+    room.updatedAt = room.nowPlaying.updatedAt;
+    rooms.rooms = rooms.rooms.map((item) => item.id === room.id ? room : item);
+    await saveRooms(rooms);
+    res.json({ room: publicRoom(room, user.id), nowPlaying: room.nowPlaying, playbackVersion: room.playbackVersion });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/account/together/leave", async (req, res, next) => {
+  try {
+    const { user } = await getUserByToken(req);
+    if (!user) {
+      res.status(401).json({ error: "请先登录云韶账号" });
+      return;
+    }
+    const rooms = await readRooms();
+    const room = rooms.rooms.find((item) => item.ownerId === user.id || item.mateId === user.id) || null;
+    if (!room) {
+      res.json({ room: null, messages: [], tracks: [] });
+      return;
+    }
+    if (room.ownerId === user.id) {
+      rooms.rooms = rooms.rooms.filter((item) => item.id !== room.id);
+      await saveRooms(rooms);
+      res.json({ room: null, dissolved: true });
+      return;
+    }
+    if (room.mateId === user.id) room.mateId = "";
+    room.updatedAt = new Date().toISOString();
+    rooms.rooms = rooms.rooms.map((item) => item.id === room.id ? room : item);
+    await saveRooms(rooms);
+    res.json({ room: null, left: true });
   } catch (error) {
     next(error);
   }
