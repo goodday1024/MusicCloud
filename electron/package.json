@@ -1,0 +1,33 @@
+{
+  "name": "caelumshao-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "electron/main.cjs",
+  "description": "云韶 CaelumShao desktop app",
+  "author": "CaelumShao",
+  "dependencies": {},
+  "build": {
+    "appId": "fun.zihang.caelumshao",
+    "productName": "云韶 CaelumShao",
+    "electronVersion": "41.7.1",
+    "asar": true,
+    "npmRebuild": false,
+    "nodeGypRebuild": false,
+    "buildDependenciesFromSource": false,
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "../release"
+    },
+    "mac": {
+      "category": "public.app-category.music",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    }
+  }
+}
