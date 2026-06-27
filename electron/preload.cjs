@@ -10,3 +10,7 @@ contextBridge.exposeInMainWorld("caelumShaoDesktop", {
     ipcRenderer.send("floating-lyric:hide");
   }
 });
+
+window.addEventListener("DOMContentLoaded", () => {
+  document.documentElement.classList.add("is-electron");
+});

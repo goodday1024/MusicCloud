@@ -1905,6 +1905,7 @@ function App() {
   const [qqQrConfigIndex, setQqQrConfigIndex] = useState(0);
 
   const audioRef = useRef(null);
+  const neteaseQrAutoStartedRef = useRef(false);
   const podcastAudioRef = useRef(null);
   const podcastEnabledRef = useRef(podcastEnabled);
   const queueRef = useRef([]);
@@ -1967,6 +1968,7 @@ function App() {
   const displayTrack = panelOpen ? infoTrack || selectedTrack || filteredTracks[0] || libraryTracks[0] || null : null;
   const playlistCount = new Set(libraryTracks.map((track) => track.playlistId).filter(Boolean)).size;
   const titleLines = splitTitle(displayTrack?.title || BRAND_CN);
+  const isDesktopApp = Boolean(window.caelumShaoDesktop?.isDesktop);
   const savedTrackList = useMemo(() => Object.values(savedTrackItems || {}).filter(Boolean), [savedTrackItems]);
   const recentTrackList = useMemo(() => (Array.isArray(recentTracks) ? recentTracks : []).filter(Boolean), [recentTracks]);
   const earthSceneTracks = useMemo(() => withEarthRegions(globalSearchEnabled ? globalTracks : libraryTracks), [globalSearchEnabled, globalTracks, libraryTracks]);
@@ -2300,6 +2302,15 @@ function App() {
       setRecentTracks(data.history);
       localStorage.setItem(recentTracksKey, JSON.stringify(data.history.slice(0, 500)));
     }
+    if (Array.isArray(data.syncedTracks)) {
+      const tracks = annotateEarthTracks(data.syncedTracks);
+      setLibraryTracks(tracks);
+      setLibraryCacheMeta({
+        updatedAt: data.user?.lastSyncedAt || new Date().toISOString(),
+        items: tracks
+      });
+      if (tracks.length) setMessage(`已从云韶账号载入 ${tracks.length} 首歌`);
+    }
   }
 
   async function submitCloudAccount(event) {
@@ -2356,10 +2367,7 @@ function App() {
     }
     setBindingMusicAccount(true);
     setSettingsOpen(false);
-    setLoginOpen(true);
-    setLoginProvider("netease");
-    setLoginMode("qr");
-    setLoginMessage("请选择要重新绑定或新绑定的音乐平台");
+    void openLoginPanel("qr");
   }
 
   async function finishMusicAccountBinding() {
@@ -2388,14 +2396,36 @@ function App() {
       if (!response.ok) throw new Error(data.error || "同步失败");
       setCloudUser(data.user || cloudUser);
       if (Array.isArray(data.items) && data.items.length) {
-        setLibraryTracks(data.items);
-        setLibraryCacheMeta(writeLibraryCache(data.items, currentAccountId));
+        const tracks = annotateEarthTracks(data.items);
+        setLibraryTracks(tracks);
+        setLibraryCacheMeta({
+          updatedAt: data.user?.lastSyncedAt || new Date().toISOString(),
+          items: tracks
+        });
       }
       flash(`云韶账号已同步 ${data.items?.length || 0} 首`);
     } catch (error) {
       flash(error.message || "同步失败");
     } finally {
       setIsLibraryLoading(false);
+    }
+  }
+
+  async function saveLibraryToAccount(items = []) {
+    if (!accountToken || !items.length) return null;
+    try {
+      const response = await fetch("/api/account/sync-library", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...accountHeaders() },
+        body: JSON.stringify({ items: items.map(compactLibraryTrack) })
+      });
+      const data = await readJsonResponse(response);
+      if (!response.ok) throw new Error(data.error || "云韶账号曲库保存失败");
+      if (data.user) setCloudUser(data.user);
+      return data;
+    } catch (error) {
+      console.warn("save library to account failed:", error?.message || error);
+      return null;
     }
   }
 
@@ -2767,17 +2797,26 @@ function App() {
       const nextFingerprint = libraryFingerprint(merged);
       if (oldFingerprint !== nextFingerprint) {
         setLibraryTracks(merged);
-        setLibraryCacheMeta(writeLibraryCache(merged, currentAccountId));
+        const saved = await saveLibraryToAccount(merged);
+        setLibraryCacheMeta({
+          updatedAt: saved?.user?.lastSyncedAt || new Date().toISOString(),
+          items: merged
+        });
       }
       setMessage(background ? "" : `曲库已同步 ${merged.length} 首`);
     } else if (!libraryTracks.length) {
-      const cached = readLibraryCache(currentAccountId);
-      if (cached.items.length) {
-        setLibraryTracks(annotateEarthTracks(cached.items));
-        setLibraryCacheMeta(cached);
-        setMessage("正在使用上次缓存的曲库，登录可能已过期");
+      if (cloudUser?.lastSyncedAt) {
+        await refreshCloudAccount();
+        setMessage("正在使用云韶账号保存的曲库，音乐账号登录可能已过期");
       } else {
-        setMessage(warnings[0] || "还没有载入曲库，请先登录网易云或 QQ 音乐");
+        const cached = readLibraryCache(currentAccountId);
+        if (cached.items.length) {
+          setLibraryTracks(annotateEarthTracks(cached.items));
+          setLibraryCacheMeta(cached);
+          setMessage("正在使用旧版本地曲库缓存，登录可能已过期");
+        } else {
+          setMessage(warnings[0] || "还没有载入曲库，请先登录网易云或 QQ 音乐");
+        }
       }
     } else if (warnings.length) {
       setMessage("正在使用缓存曲库，登录可能已过期");
@@ -2822,6 +2861,22 @@ function App() {
     setLoginMessage("已收到 QQ 音乐网页 Cookie，正在自动登录");
     void loginWithQqCookieValue(cookieValue);
   }, []);
+
+  useEffect(() => {
+    if (!loginOpen || loginProvider !== "netease" || loginMode !== "qr") return undefined;
+    if (neteaseQrAutoStartedRef.current) return undefined;
+    if (loginBusy || neteaseState?.qrKey || neteaseState?.qrImg) return undefined;
+    const timer = window.setTimeout(() => {
+      neteaseQrAutoStartedRef.current = true;
+      void startNeteaseQrLogin();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loginBusy, loginMode, loginOpen, loginProvider, neteaseState?.qrImg, neteaseState?.qrKey]);
+
+  useEffect(() => {
+    if (loginOpen && loginProvider === "netease" && loginMode === "qr") return;
+    neteaseQrAutoStartedRef.current = false;
+  }, [loginMode, loginOpen, loginProvider]);
 
   useEffect(() => {
     const cached = readLibraryCache(currentAccountId);
@@ -3250,6 +3305,11 @@ function App() {
     setLoginMode(mode);
     setLoginMessage("");
     if (mode !== "qr") return;
+    neteaseQrAutoStartedRef.current = true;
+    await startNeteaseQrLogin();
+  }
+
+  async function startNeteaseQrLogin() {
     setLoginBusy(true);
     setNeteaseState((state) => ({
       ...(state || {}),
@@ -3906,7 +3966,7 @@ function App() {
       ) : (
       <>
       <div className="space-field" />
-      {lyricDisplay?.lines?.length > 0 && (
+      {!isDesktopApp && lyricDisplay?.lines?.length > 0 && (
         <div
           className="top-lyric"
           aria-live="polite"

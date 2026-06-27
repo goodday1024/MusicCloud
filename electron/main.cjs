@@ -3,6 +3,7 @@ const path = require("node:path");
 
 const isDev = !app.isPackaged;
 const devServerUrl = process.env.VITE_DEV_SERVER_URL || "http://localhost:5173";
+let mainWindow = null;
 let lyricWindow = null;
 
 function createLyricWindow() {
@@ -38,7 +39,14 @@ function createLyricWindow() {
 }
 
 function createMainWindow() {
-  const mainWindow = new BrowserWindow({
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    return mainWindow;
+  }
+
+  mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
     minWidth: 980,
@@ -61,6 +69,15 @@ function createMainWindow() {
     return { action: "deny" };
   });
 
+  mainWindow.once("ready-to-show", () => {
+    mainWindow?.show();
+    mainWindow?.focus();
+  });
+
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
+
   if (isDev) {
     mainWindow.loadURL(devServerUrl);
   } else {
@@ -78,7 +95,7 @@ app.whenReady().then(() => {
   createLyricWindow();
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
+    createMainWindow();
   });
 });
 

@@ -670,6 +670,14 @@ canvas {
   scrollbar-width: none;
 }
 
+.is-electron .hud-top {
+  padding-left: 104px;
+}
+
+.is-electron .search {
+  left: 96px;
+}
+
 .hud-top::-webkit-scrollbar {
   display: none;
 }
@@ -2312,6 +2320,10 @@ button.copy-btn {
     top: calc(112px + env(safe-area-inset-top));
     width: min(386px, calc(100vw - 40px));
     left: 16px;
+  }
+
+  .is-electron .hud-top {
+    padding-left: 20px;
   }
 
 }

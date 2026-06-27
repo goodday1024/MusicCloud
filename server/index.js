@@ -917,6 +917,37 @@ function trackKeyForServer(track = {}) {
   return String(track.libraryKey || track.id || track.songId || track.mediaId || `${track.platform || ""}:${track.title || ""}:${track.artist || ""}`).slice(0, 240);
 }
 
+function compactLibraryTrack(track = {}) {
+  const platform = track.platform || track.sourcePlatform || "";
+  const mediaId = track.mediaId || track.media_mid || track.raw?.strMediaMid || track.raw?.media_mid || "";
+  return {
+    id: cleanText(track.id, 120),
+    songId: cleanText(track.songId || track.songid, 120),
+    title: cleanText(track.title, 160),
+    artist: cleanText(track.artist, 160),
+    album: cleanText(track.album, 160),
+    cover: cleanText(track.cover, 800),
+    duration: Number(track.duration || 0),
+    publishTime: cleanText(track.publishTime, 64),
+    year: cleanText(track.year, 16),
+    platform: cleanText(platform, 32),
+    sourcePlatform: cleanText(track.sourcePlatform || platform, 32),
+    mediaId: cleanText(mediaId, 160),
+    qqSearchKey: cleanText(track.qqSearchKey, 240),
+    musicUrl: cleanText(track.musicUrl || track.url, 1200),
+    libraryKey: cleanText(track.libraryKey || trackKeyForServer(track), 240),
+    playlistId: cleanText(track.playlistId, 120),
+    playlistName: cleanText(track.playlistName, 160),
+    playlistDescription: cleanText(track.playlistDescription, 500),
+    playCount: Number(track.playCount || 0),
+    geoRegionKey: cleanText(track.geoRegionKey, 80),
+    geoRegionName: cleanText(track.geoRegionName, 120),
+    geoRegionLat: track.geoRegionLat === "" || track.geoRegionLat == null ? "" : Number(track.geoRegionLat),
+    geoRegionLng: track.geoRegionLng === "" || track.geoRegionLng == null ? "" : Number(track.geoRegionLng),
+    geoRegionTint: cleanText(track.geoRegionTint, 64)
+  };
+}
+
 function cookieHeaderFromState(state) {
   return (state?.cookies || []).join("; ");
 }
@@ -4884,11 +4915,16 @@ app.post("/api/account/sync-library", async (req, res, next) => {
       res.status(401).json({ error: "请先登录云韶账号" });
       return;
     }
-    const [netease, qq] = await Promise.all([
-      fetchNeteaseLibraryTracks(req).catch(() => []),
-      fetchQQMusicLibraryTracks(req).catch(() => [])
-    ]);
-    user.syncedTracks = [...netease, ...qq].slice(0, 2000);
+    const providedItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (providedItems.length) {
+      user.syncedTracks = providedItems.map(compactLibraryTrack).slice(0, 2000);
+    } else {
+      const [netease, qq] = await Promise.all([
+        fetchNeteaseLibraryTracks(req).catch(() => []),
+        fetchQQMusicLibraryTracks(req).catch(() => [])
+      ]);
+      user.syncedTracks = [...netease, ...qq].map(compactLibraryTrack).slice(0, 2000);
+    }
     user.lastSyncedAt = new Date().toISOString();
     await saveUsers(data);
     res.json({ user: publicUser(user), items: user.syncedTracks });
