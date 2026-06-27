@@ -35,7 +35,8 @@ function installRemoteApiFetch() {
   const isHttpPage = /^https?:$/.test(window.location.protocol);
   const isLocalHttpDev = isHttpPage && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname);
   const isZihangWeb = isHttpPage && /(^|\.)zihang\.fun$/.test(window.location.hostname);
-  if ((isLocalHttpDev || isZihangWeb) && !import.meta.env.VITE_FORCE_REMOTE_FETCH) {
+  const isDesktopApp = Boolean(window.caelumShaoDesktop?.isDesktop);
+  if (!isDesktopApp && (isLocalHttpDev || isZihangWeb) && !import.meta.env.VITE_FORCE_REMOTE_FETCH) {
     window.__caelumShaoRemoteFetchInstalled = true;
     return;
   }
