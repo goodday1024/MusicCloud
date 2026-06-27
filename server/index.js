@@ -68,6 +68,7 @@ const qqMusicQrConfigs = [
 ].filter((item, index, list) => item.appid && item.callback && list.findIndex((entry) => entry.appid === item.appid && entry.callback === item.callback) === index);
 const narrationLeadInSeconds = 0.18;
 const requestWindows = new Map();
+let blobPersistenceDisabledReason = "";
 const browserCookieName = "agentio_netease_cookie";
 const qqBrowserCookieName = "caelumshao_qqmusic_cookie";
 
@@ -563,7 +564,16 @@ function normalizeInviteCodes(codes = []) {
 }
 
 function shouldUsePersistentBlob() {
-  return Boolean(process.env.BLOB_READ_WRITE_TOKEN);
+  return Boolean(process.env.BLOB_READ_WRITE_TOKEN && !blobPersistenceDisabledReason);
+}
+
+function isBlobStoreSuspendedError(error) {
+  return /store has been suspended|suspended/i.test(String(error?.message || error?.name || error || ""));
+}
+
+function disableBlobPersistence(error) {
+  blobPersistenceDisabledReason = error?.message || String(error || "Vercel Blob unavailable");
+  console.warn("Vercel Blob persistence disabled for this process:", blobPersistenceDisabledReason);
 }
 
 async function readPersistentJson(filePath, blobName, fallback) {
@@ -574,6 +584,7 @@ async function readPersistentJson(filePath, blobName, fallback) {
       const text = await new Response(result.stream).text();
       return text ? JSON.parse(text) : fallback;
     } catch (error) {
+      if (isBlobStoreSuspendedError(error)) disableBlobPersistence(error);
       if (!/not found|404|BlobNotFound/i.test(error?.message || error?.name || "")) {
         console.warn(`readPersistentJson blob failed for ${blobName}:`, error?.message || error);
       }
@@ -597,12 +608,20 @@ async function writePersistentJson(filePath, blobName, payload) {
     console.warn(`writePersistentJson local failed for ${blobName}:`, error?.message || error);
   });
   if (shouldUsePersistentBlob()) {
-    await put(`${persistentJsonPrefix}/${blobName}`, text, {
-      access: "private",
-      contentType: "application/json",
-      addRandomSuffix: false,
-      allowOverwrite: true
-    });
+    try {
+      await put(`${persistentJsonPrefix}/${blobName}`, text, {
+        access: "private",
+        contentType: "application/json",
+        addRandomSuffix: false,
+        allowOverwrite: true
+      });
+    } catch (error) {
+      if (isBlobStoreSuspendedError(error)) {
+        disableBlobPersistence(error);
+        return;
+      }
+      throw error;
+    }
   }
 }
 
@@ -4446,6 +4465,10 @@ async function publishGeneratedFile(filePath, fileName) {
       });
       return `/media/blob/${encodeURIComponent(blob.pathname || pathname)}`;
     } catch (error) {
+      if (isBlobStoreSuspendedError(error)) {
+        console.warn("Vercel Blob suspended, using local generated file URL:", error?.message || error);
+        return `/media/${fileName}`;
+      }
       if (!/private access|public access|configured with/i.test(error?.message || "")) throw error;
       const blob = await put(pathname, buffer, {
         access: "public",
@@ -4503,7 +4526,10 @@ app.get("/api/config", (_req, res) => {
     qqMusicApi1Configured: Boolean(qqMusicApi1BaseUrl),
     wpMusicApiConfigured: Boolean(wpMusicApiBaseUrl),
     localMusicApiConfigured: Boolean(existsSync(localMusicApiDir)),
-    musicPlatform: defaultMusicPlatform
+    musicPlatform: defaultMusicPlatform,
+    blobPersistenceConfigured: Boolean(process.env.BLOB_READ_WRITE_TOKEN),
+    blobPersistenceAvailable: shouldUsePersistentBlob(),
+    blobPersistenceDisabledReason
   });
 });
 

@@ -35,8 +35,8 @@ function installRemoteApiFetch() {
   const isHttpPage = /^https?:$/.test(window.location.protocol);
   const isLocalHttpDev = isHttpPage && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname);
   const isZihangWeb = isHttpPage && /(^|\.)zihang\.fun$/.test(window.location.hostname);
-  const isDesktopApp = Boolean(window.caelumShaoDesktop?.isDesktop);
-  if (!isDesktopApp && (isLocalHttpDev || isZihangWeb) && !import.meta.env.VITE_FORCE_REMOTE_FETCH) {
+  const hasDesktopBridgeAtInstall = Boolean(window.caelumShaoDesktop?.isDesktop);
+  if (!hasDesktopBridgeAtInstall && (isLocalHttpDev || isZihangWeb) && !import.meta.env.VITE_FORCE_REMOTE_FETCH) {
     window.__caelumShaoRemoteFetchInstalled = true;
     return;
   }
@@ -48,6 +48,7 @@ function installRemoteApiFetch() {
     const nextInput = typeof input === "string"
       ? `${REMOTE_API_BASE_URL}${input}`
       : new Request(`${REMOTE_API_BASE_URL}${new URL(input.url).pathname}${new URL(input.url).search}`, input);
+    const isDesktopApp = Boolean(window.caelumShaoDesktop?.isDesktop);
     if (isDesktopApp && window.caelumShaoDesktop?.remoteFetch) {
       const targetUrl = typeof nextInput === "string" ? nextInput : nextInput.url;
       const headers = Object.fromEntries(new Headers(init.headers || (typeof input === "string" ? {} : input.headers || {})).entries());
@@ -1774,6 +1775,7 @@ function App() {
   const [accessMode, setAccessMode] = useState(() => localStorage.getItem("caelumshao.accessMode.v1") || "");
   const [activatedInvite, setActivatedInvite] = useState(() => localStorage.getItem("caelumshao.activatedInvite.v1") || "");
   const [accessMessage, setAccessMessage] = useState("");
+  const [accountBusy, setAccountBusy] = useState(false);
   const [inviteInput, setInviteInput] = useState("");
   const [inviteCodes, setInviteCodes] = useState([]);
   const [inviteDraft, setInviteDraft] = useState("");
@@ -2358,7 +2360,10 @@ function App() {
 
   async function submitCloudAccount(event) {
     event?.preventDefault?.();
+    if (accountBusy) return;
     const endpoint = accountMode === "register" ? "/api/account/register" : "/api/account/login";
+    setAccountBusy(true);
+    setAccessMessage(accountMode === "register" ? "正在注册云韶账号..." : "正在登录云韶账号...");
     try {
       const response = await fetch(endpoint, {
         method: "POST",
@@ -2381,6 +2386,8 @@ function App() {
       setAccessMessage(accountMode === "register" ? "云韶账号已注册并激活" : "云韶账号已登录");
     } catch (error) {
       setAccessMessage(error.message || "云韶账号请求失败");
+    } finally {
+      setAccountBusy(false);
     }
   }
 
@@ -4038,7 +4045,8 @@ function App() {
               </div>
               <input value={accountUsername} onChange={(event) => setAccountUsername(event.target.value)} placeholder="云韶账号 / 邮箱" autoComplete="username" />
               <input value={accountPassword} onChange={(event) => setAccountPassword(event.target.value)} placeholder="密码" type="password" autoComplete={accountMode === "register" ? "new-password" : "current-password"} />
-              <button type="submit">{accountMode === "register" ? "注册并进入" : "登录云韶账号"}</button>
+              <button type="submit" disabled={accountBusy}>{accountBusy ? (accountMode === "register" ? "注册中..." : "登录中...") : (accountMode === "register" ? "注册并进入" : "登录云韶账号")}</button>
+              {accessMessage && <small className="account-message">{accessMessage}</small>}
               <small>注册后可跨设备同步最近播放、拾遗和绑定的音乐账号。</small>
             </form>
             {musicLoginPanel}
