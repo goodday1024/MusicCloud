@@ -28,7 +28,7 @@ const GLOBAL_RENDER_LIMITS = {
   low: { tracks: 520, dust: 4600, mist: 480 },
   high: { tracks: 1800, dust: 24000, mist: 3200 }
 };
-const REMOTE_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "https://zihang.fun").replace(/\/$/, "");
+const REMOTE_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "https://www.zihang.fun").replace(/\/$/, "");
 
 function installRemoteApiFetch() {
   if (typeof window === "undefined" || window.__caelumShaoRemoteFetchInstalled) return;
@@ -48,6 +48,22 @@ function installRemoteApiFetch() {
     const nextInput = typeof input === "string"
       ? `${REMOTE_API_BASE_URL}${input}`
       : new Request(`${REMOTE_API_BASE_URL}${new URL(input.url).pathname}${new URL(input.url).search}`, input);
+    if (isDesktopApp && window.caelumShaoDesktop?.remoteFetch) {
+      const targetUrl = typeof nextInput === "string" ? nextInput : nextInput.url;
+      const headers = Object.fromEntries(new Headers(init.headers || (typeof input === "string" ? {} : input.headers || {})).entries());
+      return window.caelumShaoDesktop.remoteFetch({
+        url: targetUrl,
+        init: {
+          method: init.method || (typeof input === "string" ? "GET" : input.method || "GET"),
+          headers,
+          body: init.body || (typeof input === "string" ? undefined : input.body || undefined)
+        }
+      }).then((result) => new Response(result.status === 204 || result.status === 304 ? null : result.body || "", {
+        status: result.status || 500,
+        statusText: result.statusText || "",
+        headers: result.headers || {}
+      }));
+    }
     return nativeFetch(nextInput, { credentials: "include", ...init });
   };
   window.__caelumShaoRemoteFetchInstalled = true;

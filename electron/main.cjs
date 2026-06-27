@@ -158,6 +158,31 @@ ipcMain.handle("account-token:clear", () => {
   return true;
 });
 
+ipcMain.handle("remote-fetch", async (_event, payload = {}) => {
+  const targetUrl = String(payload.url || "");
+  if (!/^https:\/\/www\.zihang\.fun\/(?:api|media)(?:\/|$)/.test(targetUrl)) {
+    return { ok: false, status: 400, statusText: "Bad Request", headers: {}, body: JSON.stringify({ error: "不允许的桌面端请求地址" }) };
+  }
+  const init = payload.init || {};
+  const response = await fetch(targetUrl, {
+    method: init.method || "GET",
+    headers: init.headers || {},
+    body: init.body || undefined
+  });
+  const headers = {};
+  response.headers.forEach((value, key) => {
+    headers[key] = value;
+  });
+  return {
+    ok: response.ok,
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+    body: await response.text(),
+    url: response.url
+  };
+});
+
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });

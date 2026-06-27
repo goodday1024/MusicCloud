@@ -17,6 +17,9 @@ contextBridge.exposeInMainWorld("caelumShaoDesktop", {
   },
   clearAccountToken() {
     return ipcRenderer.invoke("account-token:clear");
+  },
+  remoteFetch(payload) {
+    return ipcRenderer.invoke("remote-fetch", payload);
   }
 });
 
