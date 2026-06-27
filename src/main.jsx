@@ -13,6 +13,7 @@ const RESOLVED_MUSIC_CACHE_KEY = "caelumshao.resolvedMusicCache.v1";
 const LYRICS_CACHE_KEY = "caelumshao.lyricsCache.v1";
 const PODCAST_CACHE_KEY = "caelumshao.podcastCache.v1";
 const RECENT_TRACKS_KEY = "caelumshao.recentTracks.v1";
+const LYRIC_POSITION_KEY = "caelumshao.lyricPosition.v1";
 const PODCAST_CACHE_TTL = 24 * 60 * 60 * 1000;
 const ADMIN_PASSWORD_KEY = "caelumshao.adminPassword.v1";
 const ACCOUNT_TOKEN_KEY = "caelumshao.accountToken.v1";
@@ -27,6 +28,29 @@ const GLOBAL_RENDER_LIMITS = {
   low: { tracks: 520, dust: 4600, mist: 480 },
   high: { tracks: 1800, dust: 24000, mist: 3200 }
 };
+const REMOTE_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "https://zihang.fun").replace(/\/$/, "");
+
+function installRemoteApiFetch() {
+  if (typeof window === "undefined" || window.__caelumShaoRemoteFetchInstalled) return;
+  const isLocalHttpDev = /^https?:$/.test(window.location.protocol) && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname);
+  if (isLocalHttpDev && !import.meta.env.VITE_FORCE_REMOTE_FETCH) {
+    window.__caelumShaoRemoteFetchInstalled = true;
+    return;
+  }
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+    const rawUrl = typeof input === "string" ? input : input?.url || "";
+    const shouldRouteRemote = rawUrl.startsWith("/api/") || rawUrl === "/api" || rawUrl.startsWith("/media/") || rawUrl === "/media";
+    if (!shouldRouteRemote) return nativeFetch(input, init);
+    const nextInput = typeof input === "string"
+      ? `${REMOTE_API_BASE_URL}${input}`
+      : new Request(`${REMOTE_API_BASE_URL}${new URL(input.url).pathname}${new URL(input.url).search}`, input);
+    return nativeFetch(nextInput, { credentials: "include", ...init });
+  };
+  window.__caelumShaoRemoteFetchInstalled = true;
+}
+
+installRemoteApiFetch();
 
 function trackKey(track) {
   if (!track) return "";
@@ -77,6 +101,18 @@ function safeFileName(value, fallback = "caelumshao") {
 function normalizePath(pathname = "") {
   const trimmed = String(pathname || "/").replace(/\/+$/, "");
   return trimmed || "/";
+}
+
+function readLyricPosition() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(LYRIC_POSITION_KEY) || "{}");
+    const x = Number(parsed.x);
+    const y = Number(parsed.y);
+    if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+  } catch (_error) {
+    // ignore broken user preference
+  }
+  return { x: 50, y: 16 };
 }
 
 function readLibraryCache(accountId = "") {
@@ -1753,6 +1789,7 @@ function App() {
   const [audioDuration, setAudioDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [lyricSegments, setLyricSegments] = useState([]);
+  const [lyricPosition, setLyricPosition] = useState(() => readLyricPosition());
   const [energy, setEnergy] = useState(0.08);
   const [message, setMessage] = useState("");
   const [isLibraryLoading, setIsLibraryLoading] = useState(false);
@@ -1778,7 +1815,6 @@ function App() {
   const [earthSelection, setEarthSelection] = useState(null);
   const [togetherRoom, setTogetherRoom] = useState(null);
   const [togetherMessages, setTogetherMessages] = useState([]);
-  const [togetherTracks, setTogetherTracks] = useState([]);
   const [togetherDraft, setTogetherDraft] = useState("");
   const [togetherRoomName, setTogetherRoomName] = useState("");
   const [togetherRoomCode, setTogetherRoomCode] = useState("");
@@ -1883,6 +1919,7 @@ function App() {
   const suppressTogetherPublishRef = useRef(false);
   const suppressPlaybackStateRef = useRef(false);
   const lastPlaybackPublishRef = useRef(0);
+  const lyricDragRef = useRef(null);
 
   const isNeteaseLoggedIn = Boolean(neteaseState?.loggedIn && (neteaseState?.uid || neteaseState?.profile?.userId || neteaseState?.profile?.nickname || neteaseState?.cookies?.length));
   const isQqMusicLoggedIn = Boolean(qqMusicState?.loggedIn && (qqMusicState?.uin || qqMusicState?.profile?.nick || qqMusicState?.profile?.creator?.hostname || qqMusicState?.provider === "QQMusicApi1" || qqMusicState?.cookies?.length));
@@ -1931,12 +1968,34 @@ function App() {
   const savedTrackList = useMemo(() => Object.values(savedTrackItems || {}).filter(Boolean), [savedTrackItems]);
   const recentTrackList = useMemo(() => (Array.isArray(recentTracks) ? recentTracks : []).filter(Boolean), [recentTracks]);
   const earthSceneTracks = useMemo(() => withEarthRegions(globalSearchEnabled ? globalTracks : libraryTracks), [globalSearchEnabled, globalTracks, libraryTracks]);
-  const currentLyricLine = useMemo(() => {
+  const lyricDisplay = useMemo(() => {
     if (!lyricSegments.length) return null;
-    return lyricSegments.find((segment) => audioTime >= Number(segment.start || 0) && audioTime < Number(segment.end || Number(segment.start || 0) + 4))
-      || [...lyricSegments].reverse().find((segment) => Number(segment.start || 0) <= audioTime)
-      || lyricSegments[0]
-      || null;
+    let activeIndex = 0;
+    for (let index = 0; index < lyricSegments.length; index += 1) {
+      const segment = lyricSegments[index];
+      const start = Number(segment.start || 0);
+      const end = Number(segment.end || lyricSegments[index + 1]?.start || start + 4);
+      if (audioTime >= start && audioTime < end) {
+        activeIndex = index;
+        break;
+      }
+      if (start <= audioTime) activeIndex = index;
+    }
+    const current = lyricSegments[activeIndex] || lyricSegments[0] || null;
+    if (!current) return null;
+    const start = Number(current.start || 0);
+    const fallbackEnd = Number(lyricSegments[activeIndex + 1]?.start || start + 4);
+    const end = Math.max(start + 0.8, Number(current.end || fallbackEnd || start + 4));
+    const ratio = Math.max(0, Math.min(1, (audioTime - start) / Math.max(0.8, end - start)));
+    return {
+      activeIndex,
+      progress: ratio,
+      lines: [
+        { segment: lyricSegments[activeIndex - 1] || null, role: "past" },
+        { segment: current, role: "current" },
+        { segment: lyricSegments[activeIndex + 1] || null, role: "future" }
+      ].filter((item) => item.segment?.text)
+    };
   }, [audioTime, lyricSegments]);
 
   useEffect(() => {
@@ -2331,7 +2390,6 @@ function App() {
       if (!response.ok) throw new Error(data.error || "一起听状态读取失败");
       setTogetherRoom(data.room || null);
       setTogetherMessages(Array.isArray(data.messages) ? data.messages : []);
-      setTogetherTracks(Array.isArray(data.tracks) ? data.tracks : []);
       const version = Number(data.playbackVersion || 0);
       const remoteTrack = data.nowPlaying?.track || null;
       const remoteUserId = data.nowPlaying?.userId || "";
@@ -2346,16 +2404,16 @@ function App() {
           const audio = audioRef.current;
           if (!audio) return;
           suppressPlaybackStateRef.current = true;
-          if (Number.isFinite(remoteTime) && Math.abs((audio.currentTime || 0) - remoteTime) > 1.2) audio.currentTime = remoteTime;
+          if (Number.isFinite(remoteTime) && Math.abs((audio.currentTime || 0) - remoteTime) > 0.45) audio.currentTime = remoteTime;
           if (data.nowPlaying?.playing) audio.play().catch(() => null);
           else audio.pause();
           window.setTimeout(() => {
             suppressPlaybackStateRef.current = false;
-          }, 700);
-        }, 500);
+          }, 360);
+        }, sameTrack ? 0 : 180);
         window.setTimeout(() => {
           suppressTogetherPublishRef.current = false;
-        }, 5000);
+        }, 1800);
       } else if (version > togetherPlaybackVersionRef.current) {
         togetherPlaybackVersionRef.current = version;
       }
@@ -2364,10 +2422,10 @@ function App() {
     }
   }
 
-  async function publishTogetherPlaybackState({ playing = isPlaying, currentTime = audioRef.current?.currentTime || 0 } = {}) {
+  async function publishTogetherPlaybackState({ playing = isPlaying, currentTime = audioRef.current?.currentTime || 0, force = false } = {}) {
     if (!accountToken || !togetherRoom || suppressTogetherPublishRef.current || suppressPlaybackStateRef.current || !currentTrackRef.current) return;
     const now = Date.now();
-    if (now - lastPlaybackPublishRef.current < 850) return;
+    if (!force && now - lastPlaybackPublishRef.current < 420) return;
     lastPlaybackPublishRef.current = now;
     try {
       const response = await fetch("/api/account/together/playback", {
@@ -2451,12 +2509,56 @@ function App() {
       if (!response.ok) throw new Error(data.error || "退出房间失败");
       setTogetherRoom(null);
       setTogetherMessages([]);
-      setTogetherTracks([]);
       togetherPlaybackVersionRef.current = 0;
       flash(data.dissolved ? "房间已解散" : "已退出房间");
     } catch (error) {
       flash(error.message || "退出房间失败");
     }
+  }
+
+  async function copyTogetherRoomId() {
+    const roomId = togetherRoom?.id || "";
+    if (!roomId) return;
+    try {
+      await navigator.clipboard?.writeText(roomId);
+      flash("房间邀请码已复制");
+    } catch (_error) {
+      flash(`房间邀请码：${roomId}`);
+    }
+  }
+
+  function startLyricDrag(event) {
+    if (event.button !== undefined && event.button !== 0) return;
+    event.preventDefault();
+    const start = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      position: lyricPosition
+    };
+    lyricDragRef.current = start;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  function moveLyricDrag(event) {
+    const drag = lyricDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const next = {
+      x: Math.max(8, Math.min(92, drag.position.x + ((event.clientX - drag.x) / Math.max(1, window.innerWidth)) * 100)),
+      y: Math.max(8, Math.min(86, drag.position.y + ((event.clientY - drag.y) / Math.max(1, window.innerHeight)) * 100))
+    };
+    setLyricPosition(next);
+  }
+
+  function endLyricDrag(event) {
+    const drag = lyricDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    lyricDragRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    setLyricPosition((position) => {
+      localStorage.setItem(LYRIC_POSITION_KEY, JSON.stringify(position));
+      return position;
+    });
   }
 
   async function publishTogetherTrack(track) {
@@ -2470,8 +2572,8 @@ function App() {
       const data = await readJsonResponse(response);
       if (!response.ok) throw new Error(data.error || "一起听同步失败");
       setTogetherRoom(data.room || togetherRoom);
-      if (Array.isArray(data.tracks)) setTogetherTracks(data.tracks);
       togetherPlaybackVersionRef.current = Number(data.playbackVersion || togetherPlaybackVersionRef.current);
+      window.setTimeout(() => void refreshTogetherRoom(), 180);
     } catch (error) {
       console.warn("publish together track failed:", error?.message || error);
     }
@@ -2687,9 +2789,9 @@ function App() {
     void refreshTogetherRoom();
     const timer = window.setInterval(() => {
       void refreshTogetherRoom();
-    }, 5000);
+    }, togetherPanelOpen ? 1200 : 2000);
     return () => window.clearInterval(timer);
-  }, [accountToken]);
+  }, [accountToken, togetherPanelOpen]);
 
   useEffect(() => {
     const hash = window.location.hash || "";
@@ -2722,7 +2824,7 @@ function App() {
   }, [isNeteaseLoggedIn, isQqMusicLoggedIn]);
 
   useEffect(() => {
-    if (!loginOpen || loginProvider !== "netease" || loginMode !== "qr" || !neteaseState?.qrKey || isNeteaseLoggedIn) return undefined;
+    if (!loginOpen || loginProvider !== "netease" || loginMode !== "qr" || !neteaseState?.qrKey) return undefined;
     const timer = window.setInterval(async () => {
       try {
         const response = await fetch("/api/netease/login/check", {
@@ -2746,10 +2848,10 @@ function App() {
       }
     }, 1800);
     return () => window.clearInterval(timer);
-  }, [bindingMusicAccount, isNeteaseLoggedIn, loginMode, loginOpen, neteaseState?.qrKey]);
+  }, [bindingMusicAccount, loginMode, loginOpen, loginProvider, neteaseState?.qrKey]);
 
   useEffect(() => {
-    if (!loginOpen || loginProvider !== "qq" || !isQqQrLoginMode(loginMode) || !qqMusicState?.qrSig || isQqMusicLoggedIn) return undefined;
+    if (!loginOpen || loginProvider !== "qq" || !isQqQrLoginMode(loginMode) || !qqMusicState?.qrSig) return undefined;
     const expectedLoginType = qqQrLoginTypeFromMode(loginMode);
     if (qqMusicState?.qrLoginType && qqMusicState.qrLoginType !== expectedLoginType) return undefined;
     const timer = window.setInterval(async () => {
@@ -2789,7 +2891,7 @@ function App() {
       }
     }, 1800);
     return () => window.clearInterval(timer);
-  }, [bindingMusicAccount, isQqMusicLoggedIn, loginMode, loginOpen, loginProvider, qqMusicState?.qrLoginType, qqMusicState?.qrSig]);
+  }, [bindingMusicAccount, loginMode, loginOpen, loginProvider, qqMusicState?.qrLoginType, qqMusicState?.qrSig]);
 
   useEffect(() => {
     const onKeyDown = (event) => {
@@ -2814,12 +2916,12 @@ function App() {
     const onTime = () => setAudioTime(audio.currentTime || 0);
     const onPlay = () => {
       setIsPlaying(true);
-      void publishTogetherPlaybackState({ playing: true, currentTime: audio.currentTime || 0 });
+      void publishTogetherPlaybackState({ playing: true, currentTime: audio.currentTime || 0, force: true });
     };
     const onPause = () => {
       if (singleLoop && audio.ended) return;
       setIsPlaying(false);
-      void publishTogetherPlaybackState({ playing: false, currentTime: audio.currentTime || 0 });
+      void publishTogetherPlaybackState({ playing: false, currentTime: audio.currentTime || 0, force: true });
     };
     const onMeta = () => setAudioDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
     const onEnded = () => {
@@ -3115,7 +3217,7 @@ function App() {
     const next = Number(event.target.value);
     audio.currentTime = (next / 100) * audioDuration;
     setAudioTime(audio.currentTime);
-    void publishTogetherPlaybackState({ playing: !audio.paused, currentTime: audio.currentTime || 0 });
+    void publishTogetherPlaybackState({ playing: !audio.paused, currentTime: audio.currentTime || 0, force: true });
   }
 
   function flash(text) {
@@ -3132,6 +3234,16 @@ function App() {
     setLoginMessage("");
     if (mode !== "qr") return;
     setLoginBusy(true);
+    setNeteaseState((state) => ({
+      ...(state || {}),
+      loggedIn: false,
+      cookies: [],
+      uid: "",
+      profile: null,
+      qrKey: "",
+      qrImg: "",
+      qrStatus: "正在生成网易云登录二维码"
+    }));
     try {
       const response = await fetch("/api/netease/login/start", { method: "POST" });
       const data = await readJsonResponse(response);
@@ -3240,6 +3352,18 @@ function App() {
     setLoginOpen(true);
     setLoginProvider("qq");
     setLoginMode("qq-qr");
+    setQqMusicState((state) => ({
+      ...(state || {}),
+      loggedIn: false,
+      cookies: [],
+      uin: "",
+      profile: null,
+      api1Credential: null,
+      qrSig: "",
+      qrImg: "",
+      qrStatus: "正在生成 QQ 音乐二维码",
+      qrLoginType: "qq"
+    }));
     setLoginMessage("正在生成 QQ 音乐二维码。若 QQ 扫码无法确认，可切换微信扫码或网页导入。");
     window.setTimeout(() => startQqMusicQrLogin(qqQrConfigIndex, "qq"), 0);
   }
@@ -3247,7 +3371,18 @@ function App() {
   function showQqMusicQrPanel() {
     setLoginProvider("qq");
     setLoginMode("qq-qr");
-    setQqMusicState((state) => (state ? { ...state, qrSig: "", qrImg: "", qrStatus: "", qrLoginType: "qq" } : state));
+    setQqMusicState((state) => ({
+      ...(state || {}),
+      loggedIn: false,
+      cookies: [],
+      uin: "",
+      profile: null,
+      api1Credential: null,
+      qrSig: "",
+      qrImg: "",
+      qrStatus: "正在生成 QQ 扫码二维码",
+      qrLoginType: "qq"
+    }));
     setLoginMessage("正在生成 QQ 扫码二维码。若确认后仍无法完成，请切换微信扫码。");
     window.setTimeout(() => startQqMusicQrLogin(qqQrConfigIndex, "qq"), 0);
   }
@@ -3255,7 +3390,18 @@ function App() {
   function showQqMusicWxQrPanel() {
     setLoginProvider("qq");
     setLoginMode("qq-wx-qr");
-    setQqMusicState((state) => (state ? { ...state, qrSig: "", qrImg: "", qrStatus: "", qrLoginType: "wx" } : state));
+    setQqMusicState((state) => ({
+      ...(state || {}),
+      loggedIn: false,
+      cookies: [],
+      uin: "",
+      profile: null,
+      api1Credential: null,
+      qrSig: "",
+      qrImg: "",
+      qrStatus: "正在生成微信扫码二维码",
+      qrLoginType: "wx"
+    }));
     setLoginMessage("正在生成微信扫码二维码。");
     window.setTimeout(() => startQqMusicQrLogin(qqQrConfigIndex, "wx"), 0);
   }
@@ -3265,6 +3411,18 @@ function App() {
     const loginType = forcedLoginType || qqQrLoginTypeFromMode(loginMode);
     setLoginBusy(true);
     setLoginMessage("");
+    setQqMusicState((state) => ({
+      ...(state || {}),
+      loggedIn: false,
+      cookies: [],
+      uin: "",
+      profile: null,
+      api1Credential: null,
+      qrSig: "",
+      qrImg: "",
+      qrStatus: `正在生成${loginType === "wx" ? "微信" : "手机 QQ"}扫码二维码`,
+      qrLoginType: loginType
+    }));
     try {
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), 12000);
@@ -3731,9 +3889,25 @@ function App() {
       ) : (
       <>
       <div className="space-field" />
-      {currentLyricLine?.text && (
-        <div className="top-lyric" aria-live="polite">
-          <span>{currentLyricLine.text}</span>
+      {lyricDisplay?.lines?.length > 0 && (
+        <div
+          className="top-lyric"
+          aria-live="polite"
+          style={{
+            "--lyric-progress": `${Math.round((lyricDisplay.progress || 0) * 100)}%`,
+            "--lyric-x": `${lyricPosition.x}%`,
+            "--lyric-y": `${lyricPosition.y}%`
+          }}
+          onPointerDown={startLyricDrag}
+          onPointerMove={moveLyricDrag}
+          onPointerUp={endLyricDrag}
+          onPointerCancel={endLyricDrag}
+        >
+          {lyricDisplay.lines.map(({ segment, role }) => (
+            <div key={`${role}-${segment.start}-${segment.text}`} className={`lyric-row ${role}`}>
+              <span>{segment.text}</span>
+            </div>
+          ))}
         </div>
       )}
       {!uiHidden && (
@@ -3885,56 +4059,66 @@ function App() {
 
       {!uiHidden && togetherPanelOpen && accountToken && betaEnabled && (
         <section className="together-panel" role="dialog" aria-modal="true" aria-label="一起听">
-          <button className="panel-close" aria-label="关闭一起听" type="button" onClick={() => setTogetherPanelOpen(false)}>×</button>
-          <div className="settings-title">一起听</div>
-          <div className="together-summary">
-            <span>{togetherRoom ? `房间 ${togetherRoom.id}` : "尚未创建房间"}</span>
-            <span>{togetherRoom ? `成员 ${[togetherRoom.ownerId, togetherRoom.mateId].filter(Boolean).length}/2` : "两人绑定后可一起听"}</span>
-            {togetherRoom && <button type="button" onClick={leaveTogetherRoom}>{togetherRoom.isOwner ? "解散房间" : "退出房间"}</button>}
+          <button className="panel-close together-close" aria-label="关闭一起听" type="button" onClick={() => setTogetherPanelOpen(false)}>×</button>
+          <div className="together-head">
+            <div>
+              <div className="settings-title">一起听</div>
+              <p>{togetherRoom ? "播放、暂停和进度会在房间内同步" : "创建房间或输入房间号，和搭子听同一首歌"}</p>
+            </div>
+            {togetherRoom && <button type="button" onClick={leaveTogetherRoom}>{togetherRoom.isOwner ? "解散" : "退出"}</button>}
           </div>
-          <div className="together-grid">
-            <form className="together-block" onSubmit={(event) => {
-              event.preventDefault();
-              void createTogetherRoom();
-            }}>
-              <div className="cover-section-title">房间</div>
-              <input value={togetherRoomName} onChange={(event) => setTogetherRoomName(event.target.value)} placeholder="房间名称" />
-              <button type="submit">创建房间</button>
-            </form>
-            <form className="together-block" onSubmit={(event) => {
-              event.preventDefault();
-              void joinTogetherRoom();
-            }}>
-              <div className="cover-section-title">加入</div>
-              <input value={togetherRoomCode} onChange={(event) => setTogetherRoomCode(event.target.value)} placeholder="输入房间号" />
-              <button type="submit">加入房间</button>
-            </form>
-            <div className="together-block together-chat">
-              <div className="cover-section-title">在线聊天</div>
-              <div className="chat-list">
-                {togetherMessages.length ? togetherMessages.map((item) => (
-                  <div key={item.id} className="chat-item">
-                    <strong>{item.username || "匿名"}</strong>
-                    <span>{item.content}</span>
-                  </div>
-                )) : <div className="cover-empty">暂时没有聊天记录</div>}
+          {togetherRoom ? (
+            <>
+              <div className="together-room-card">
+                <button type="button" onClick={copyTogetherRoomId} title="复制房间邀请码">
+                  <span>房间号</span>
+                  <strong>{togetherRoom.id}</strong>
+                </button>
+                <div>
+                  <span>成员</span>
+                  <strong>{[togetherRoom.ownerId, togetherRoom.mateId].filter(Boolean).length}/2</strong>
+                </div>
+                <div>
+                  <span>状态</span>
+                  <strong>{isPlaying ? "同步播放中" : "等待播放"}</strong>
+                </div>
               </div>
-              <form className="together-chat-compose" onSubmit={sendTogetherMessage}>
-                <input value={togetherDraft} onChange={(event) => setTogetherDraft(event.target.value)} placeholder="发一句话..." />
-                <button type="submit">发送</button>
+              <div className="together-block together-chat">
+                <div className="cover-section-title">聊天</div>
+                <div className="chat-list">
+                  {togetherMessages.length ? togetherMessages.map((item) => (
+                    <div key={item.id} className={`chat-item ${item.userId === cloudUser?.id ? "mine" : ""}`}>
+                      <strong>{item.username || "匿名"}</strong>
+                      <span>{item.content}</span>
+                    </div>
+                  )) : <div className="cover-empty">还没有消息</div>}
+                </div>
+                <form className="together-chat-compose" onSubmit={sendTogetherMessage}>
+                  <input value={togetherDraft} onChange={(event) => setTogetherDraft(event.target.value)} placeholder="发一句话..." />
+                  <button type="submit">发送</button>
+                </form>
+              </div>
+            </>
+          ) : (
+            <div className="together-actions">
+              <form className="together-block" onSubmit={(event) => {
+                event.preventDefault();
+                void createTogetherRoom();
+              }}>
+                <div className="cover-section-title">创建</div>
+                <input value={togetherRoomName} onChange={(event) => setTogetherRoomName(event.target.value)} placeholder="房间名称，可不填" />
+                <button type="submit">创建房间</button>
+              </form>
+              <form className="together-block" onSubmit={(event) => {
+                event.preventDefault();
+                void joinTogetherRoom();
+              }}>
+                <div className="cover-section-title">加入</div>
+                <input value={togetherRoomCode} onChange={(event) => setTogetherRoomCode(event.target.value)} placeholder="输入房间号" />
+                <button type="submit">加入房间</button>
               </form>
             </div>
-          </div>
-          <div className="together-tracks">
-            <div className="cover-section-title">双方歌单并集</div>
-            <div className="cover-grid">
-              {togetherTracks.length ? togetherTracks.map((track, index) => (
-                <button key={`${trackKey(track)}-${index}`} className="cover-tile" type="button" onClick={() => playTrackFromUi(track)}>
-                  {track.cover ? <img src={track.cover} alt="" loading="lazy" /> : <span />}
-                </button>
-              )) : <div className="cover-empty">创建或加入房间后显示</div>}
-            </div>
-          </div>
+          )}
         </section>
       )}
 

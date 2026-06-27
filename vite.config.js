@@ -6,8 +6,16 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": "http://localhost:8787",
-      "/media": "http://localhost:8787"
+      "/api": {
+        target: "https://zihang.fun",
+        changeOrigin: true,
+        secure: true
+      },
+      "/media": {
+        target: "https://zihang.fun",
+        changeOrigin: true,
+        secure: true
+      }
     }
   }
 });

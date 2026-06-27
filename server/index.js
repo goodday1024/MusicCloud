@@ -361,7 +361,16 @@ app.use(
   cors(
     process.env.CORS_ORIGIN
       ? { origin: process.env.CORS_ORIGIN.split(",").map((item) => item.trim()).filter(Boolean), credentials: true }
-      : { origin: [/^http:\/\/localhost:517\d$/, /^http:\/\/127\.0\.0\.1:517\d$/], credentials: true }
+      : {
+          origin: [
+            /^http:\/\/localhost:517\d$/,
+            /^http:\/\/127\.0\.0\.1:517\d$/,
+            "https://zihang.fun",
+            "https://www.zihang.fun",
+            "file://"
+          ],
+          credentials: true
+        }
   )
 );
 app.use(express.json({ limit: "2mb" }));
@@ -707,7 +716,7 @@ function compactRoomMessage(message = {}) {
   };
 }
 
-function buildTogetherTracks(left = [], right = []) {
+function mergeTogetherPlaybackTracks(left = [], right = []) {
   const map = new Map();
   [...left, ...right].filter(Boolean).forEach((track, index) => {
     const key = trackKeyForServer(track) || `${track.title || ""}:${track.artist || ""}:${index}`;
@@ -728,12 +737,11 @@ function publicRoom(room = {}, currentUserId = "") {
 
 async function getTogetherState(req) {
   const { data, user } = await getUserByToken(req);
-  if (!user) return { data, user: null, room: null, messages: [], trackIds: [], tracks: [] };
+  if (!user) return { data, user: null, room: null, messages: [], trackIds: [] };
   const rooms = await readRooms();
   const room = rooms.rooms.find((item) => item.ownerId === user.id || item.mateId === user.id || item.participants?.includes?.(user.id)) || null;
   const messages = room?.messages || [];
-  const tracks = room?.tracks || [];
-  return { data, user, room, messages, tracks, rooms };
+  return { data, user, room, messages, trackIds: room?.trackIds || [], rooms };
 }
 
 async function listUnusedInviteCodes() {
@@ -4687,13 +4695,7 @@ app.get("/api/account/together", async (req, res, next) => {
       return;
     }
     const trackIds = Array.isArray(room.trackIds) ? room.trackIds : [];
-    const me = await readUsers();
-    const owner = me.users.find((item) => item.id === room.ownerId) || null;
-    const mate = me.users.find((item) => item.id === room.mateId) || null;
-    const ownerTracks = owner?.syncedTracks?.length ? owner.syncedTracks : owner?.savedTracks || [];
-    const mateTracks = mate?.syncedTracks?.length ? mate.syncedTracks : mate?.savedTracks || [];
-    const tracks = buildTogetherTracks(ownerTracks, mateTracks);
-    res.json({ room: publicRoom(room, user.id), messages: room.messages || [], tracks, trackIds, nowPlaying: room.nowPlaying || null, playbackVersion: room.playbackVersion || 0 });
+    res.json({ room: publicRoom(room, user.id), messages: room.messages || [], trackIds, nowPlaying: room.nowPlaying || null, playbackVersion: room.playbackVersion || 0 });
   } catch (error) {
     next(error);
   }
@@ -4755,7 +4757,7 @@ app.post("/api/account/together/track", async (req, res, next) => {
       return;
     }
     room.trackIds = Array.from(new Set([...(room.trackIds || []), trackId])).slice(0, 1000);
-    room.tracks = buildTogetherTracks(room.tracks || [], [track]);
+    room.tracks = mergeTogetherPlaybackTracks(room.tracks || [], [track]).slice(-80);
     room.nowPlaying = {
       track,
       trackId,
@@ -4939,6 +4941,7 @@ app.get("/api/netease/state", async (req, res, next) => {
 app.post("/api/netease/login/start", async (_req, res, next) => {
   try {
     const state = await startNeteaseLogin();
+    clearBrowserNeteaseCookie(res);
     res.json(serializeNeteaseState(state));
   } catch (error) {
     next(error);
@@ -5090,6 +5093,7 @@ app.post("/api/qqmusic/login/qr/start", async (req, res, next) => {
       req.body?.configIndex || req.query?.configIndex || 0,
       req.body?.loginType || req.query?.loginType || "qq"
     );
+    clearBrowserQQMusicCookie(res);
     res.json(serializeQQMusicState(state));
   } catch (error) {
     next(error);

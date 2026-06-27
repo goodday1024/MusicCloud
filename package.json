@@ -3,14 +3,38 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "electron/main.cjs",
   "engines": {
     "node": "22.x"
   },
   "scripts": {
-    "dev": "concurrently \"node server/index.js\" \"vite --host 0.0.0.0\"",
+    "dev": "vite --host 0.0.0.0",
+    "dev:fullstack": "concurrently \"node server/index.js\" \"vite --host 0.0.0.0\"",
+    "dev:electron": "concurrently \"vite --host 0.0.0.0\" \"wait-on http://localhost:5173 && VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "server": "node server/index.js",
     "build": "vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "preview": "vite preview --host 0.0.0.0",
+    "pack:mac": "npm run build && electron-builder --mac --dir",
+    "dist:mac": "npm run build && electron-builder --mac"
+  },
+  "build": {
+    "appId": "fun.zihang.caelumshao",
+    "productName": "云韶 CaelumShao",
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "category": "public.app-category.music",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    }
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
@@ -33,5 +57,10 @@
     "three": "^0.184.0",
     "three-globe": "^2.45.2",
     "vite": "^6.3.5"
+  },
+  "devDependencies": {
+    "electron": "^41.7.1",
+    "electron-builder": "^26.15.3",
+    "wait-on": "^9.0.10"
   }
 }

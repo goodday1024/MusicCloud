@@ -81,3 +81,29 @@ The Vercel config routes:
 - `/` to the Vite static app in `dist`
 - `/api/*` to the Express serverless function catch-all
 - `/media/*` to the same function for local temporary media fallback
+
+## macOS Electron
+
+The desktop app is an Electron shell around the Vite frontend. It does not start a local API server by default; frontend requests to `/api/*` and `/media/*` are routed to:
+
+```text
+VITE_API_BASE_URL=https://zihang.fun
+```
+
+Development:
+
+```bash
+npm run dev:electron
+```
+
+Build a macOS app directory:
+
+```bash
+npm run pack:mac
+```
+
+Build macOS distributables:
+
+```bash
+npm run dist:mac
+```
