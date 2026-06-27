@@ -2226,8 +2226,33 @@ function App() {
     return source.filter((item) => item && !item.artistCenter && !item.placeholder);
   }
 
-  function accountHeaders() {
-    return accountToken ? { Authorization: `Bearer ${accountToken}` } : {};
+  function accountHeaders(token = accountToken) {
+    return token ? { Authorization: `Bearer ${token}`, "X-Caelum-Token": token } : {};
+  }
+
+  function persistDesktopAccountToken(token) {
+    if (!token) return;
+    window.caelumShaoDesktop?.setAccountToken?.(token).catch(() => null);
+  }
+
+  function clearDesktopAccountToken() {
+    window.caelumShaoDesktop?.clearAccountToken?.().catch(() => null);
+  }
+
+  function clearCloudSession(messageText = "云韶账号登录已失效，请重新登录") {
+    localStorage.removeItem(ACCOUNT_TOKEN_KEY);
+    clearDesktopAccountToken();
+    setAccountToken("");
+    setCloudUser(null);
+    setAccessGranted(false);
+    setAccessMode("");
+    setActivatedInvite("");
+    setBetaEnabled(false);
+    setTogetherRoom(null);
+    setTogetherMessages([]);
+    setTogetherPanelOpen(false);
+    setAccessMessage(messageText);
+    flash(messageText);
   }
 
   async function refreshInviteCodes() {
@@ -2273,6 +2298,7 @@ function App() {
   function applyAccountPayload(data = {}) {
     if (data.token) {
       localStorage.setItem(ACCOUNT_TOKEN_KEY, data.token);
+      persistDesktopAccountToken(data.token);
       setAccountToken(data.token);
     }
     if (data.user) {
@@ -2342,22 +2368,21 @@ function App() {
     }
   }
 
-  async function refreshCloudAccount() {
-    if (!accountToken) return;
+  async function refreshCloudAccount(tokenOverride = accountToken) {
+    const token = tokenOverride || "";
+    if (!token) return;
     try {
-      const response = await fetch("/api/account/me", { headers: accountHeaders() });
+      const response = await fetch("/api/account/me", { headers: accountHeaders(token) });
       const data = await readJsonResponse(response);
       if (!response.ok) throw new Error(data.error || "云韶账号已失效");
+      if (token && token !== accountToken) {
+        localStorage.setItem(ACCOUNT_TOKEN_KEY, token);
+        persistDesktopAccountToken(token);
+        setAccountToken(token);
+      }
       applyAccountPayload(data);
     } catch (_error) {
-      localStorage.removeItem(ACCOUNT_TOKEN_KEY);
-      setAccountToken("");
-      setCloudUser(null);
-      setAccessGranted(false);
-      setAccessMode("");
-      setActivatedInvite("");
-      setBetaEnabled(false);
-      setAccessMessage("云韶账号登录已失效，请重新登录");
+      clearCloudSession("云韶账号登录已失效，请重新登录");
     }
   }
 
@@ -2435,6 +2460,10 @@ function App() {
     try {
       const response = await fetch("/api/account/together", { headers: accountHeaders() });
       const data = await readJsonResponse(response);
+      if (response.status === 401) {
+        clearCloudSession(data.error || "请先重新登录云韶账号");
+        return;
+      }
       if (!response.ok) throw new Error(data.error || "一起听状态读取失败");
       setTogetherRoom(data.room || null);
       setTogetherMessages(Array.isArray(data.messages) ? data.messages : []);
@@ -2482,6 +2511,10 @@ function App() {
         body: JSON.stringify({ playing, currentTime })
       });
       const data = await readJsonResponse(response);
+      if (response.status === 401) {
+        clearCloudSession(data.error || "请先重新登录云韶账号");
+        return;
+      }
       if (!response.ok) throw new Error(data.error || "一起听进度同步失败");
       togetherPlaybackVersionRef.current = Number(data.playbackVersion || togetherPlaybackVersionRef.current);
     } catch (error) {
@@ -2498,6 +2531,10 @@ function App() {
         body: JSON.stringify({ name: togetherRoomName || `${cloudUser?.username || "云韶"} 的一起听` })
       });
       const data = await readJsonResponse(response);
+      if (response.status === 401) {
+        clearCloudSession(data.error || "请先重新登录云韶账号");
+        return;
+      }
       if (!response.ok) throw new Error(data.error || "创建一起听失败");
       setTogetherRoom(data.room || null);
       flash("一起听房间已创建");
@@ -2520,6 +2557,10 @@ function App() {
         body: JSON.stringify({ roomId: togetherRoomCode.trim() })
       });
       const data = await readJsonResponse(response);
+      if (response.status === 401) {
+        clearCloudSession(data.error || "请先重新登录云韶账号");
+        return;
+      }
       if (!response.ok) throw new Error(data.error || "加入一起听失败");
       setTogetherRoom(data.room || null);
       flash("已加入一起听");
@@ -2541,6 +2582,10 @@ function App() {
         body: JSON.stringify({ content })
       });
       const data = await readJsonResponse(response);
+      if (response.status === 401) {
+        clearCloudSession(data.error || "请先重新登录云韶账号");
+        return;
+      }
       if (!response.ok) throw new Error(data.error || "发送消息失败");
       setTogetherMessages(Array.isArray(data.messages) ? data.messages : []);
       setTogetherDraft("");
@@ -2554,6 +2599,10 @@ function App() {
     try {
       const response = await fetch("/api/account/together/leave", { method: "POST", headers: accountHeaders() });
       const data = await readJsonResponse(response);
+      if (response.status === 401) {
+        clearCloudSession(data.error || "请先重新登录云韶账号");
+        return;
+      }
       if (!response.ok) throw new Error(data.error || "退出房间失败");
       setTogetherRoom(null);
       setTogetherMessages([]);
@@ -2618,6 +2667,10 @@ function App() {
         body: JSON.stringify({ track })
       });
       const data = await readJsonResponse(response);
+      if (response.status === 401) {
+        clearCloudSession(data.error || "请先重新登录云韶账号");
+        return;
+      }
       if (!response.ok) throw new Error(data.error || "一起听同步失败");
       setTogetherRoom(data.room || togetherRoom);
       togetherPlaybackVersionRef.current = Number(data.playbackVersion || togetherPlaybackVersionRef.current);
@@ -2668,6 +2721,7 @@ function App() {
       localStorage.removeItem(recentTracksKey);
     }
     localStorage.removeItem(ACCOUNT_TOKEN_KEY);
+    clearDesktopAccountToken();
     setAccountToken("");
     setCloudUser(null);
     setAccessGranted(false);
@@ -2829,7 +2883,17 @@ function App() {
   useEffect(() => {
     refreshNeteaseState().catch(() => setNeteaseState({ loggedIn: false }));
     refreshQqMusicState().catch(() => setQqMusicState({ loggedIn: false }));
-    refreshCloudAccount();
+    let cancelled = false;
+    void (async () => {
+      const desktopToken = !accountToken
+        ? await window.caelumShaoDesktop?.getAccountToken?.().catch(() => "")
+        : "";
+      if (cancelled) return;
+      await refreshCloudAccount(desktopToken || accountToken);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {

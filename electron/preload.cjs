@@ -8,6 +8,15 @@ contextBridge.exposeInMainWorld("caelumShaoDesktop", {
   },
   hideFloatingLyric() {
     ipcRenderer.send("floating-lyric:hide");
+  },
+  getAccountToken() {
+    return ipcRenderer.invoke("account-token:get");
+  },
+  setAccountToken(token) {
+    return ipcRenderer.invoke("account-token:set", token);
+  },
+  clearAccountToken() {
+    return ipcRenderer.invoke("account-token:clear");
   }
 });
 

@@ -1,10 +1,38 @@
 const { app, BrowserWindow, Menu, ipcMain, screen, shell } = require("electron");
 const path = require("node:path");
+const fs = require("node:fs");
 
 const isDev = !app.isPackaged;
 const devServerUrl = process.env.VITE_DEV_SERVER_URL || "http://localhost:5173";
 let mainWindow = null;
 let lyricWindow = null;
+
+function sessionFilePath() {
+  return path.join(app.getPath("userData"), "caelumshao-session.json");
+}
+
+function readDesktopSession() {
+  try {
+    const raw = fs.readFileSync(sessionFilePath(), "utf8");
+    const data = JSON.parse(raw);
+    return {
+      accountToken: String(data.accountToken || "")
+    };
+  } catch (_error) {
+    return { accountToken: "" };
+  }
+}
+
+function writeDesktopSession(next = {}) {
+  const payload = {
+    ...readDesktopSession(),
+    ...next,
+    updatedAt: new Date().toISOString()
+  };
+  fs.mkdirSync(path.dirname(sessionFilePath()), { recursive: true });
+  fs.writeFileSync(sessionFilePath(), JSON.stringify(payload, null, 2), "utf8");
+  return payload;
+}
 
 function createLyricWindow() {
   if (lyricWindow && !lyricWindow.isDestroyed()) return lyricWindow;
@@ -116,6 +144,18 @@ ipcMain.on("floating-lyric:update", (_event, payload = {}) => {
 
 ipcMain.on("floating-lyric:hide", () => {
   if (lyricWindow && !lyricWindow.isDestroyed()) lyricWindow.hide();
+});
+
+ipcMain.handle("account-token:get", () => readDesktopSession().accountToken || "");
+
+ipcMain.handle("account-token:set", (_event, token = "") => {
+  writeDesktopSession({ accountToken: String(token || "") });
+  return true;
+});
+
+ipcMain.handle("account-token:clear", () => {
+  writeDesktopSession({ accountToken: "" });
+  return true;
 });
 
 app.on("window-all-closed", () => {
