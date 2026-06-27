@@ -20,6 +20,7 @@ function createLyricWindow() {
     skipTaskbar: true,
     alwaysOnTop: true,
     hasShadow: false,
+    show: false,
     backgroundColor: "#00000000",
     title: "云韶悬浮歌词",
     webPreferences: {
@@ -90,6 +91,10 @@ function createMainWindow() {
 app.name = "云韶 CaelumShao";
 
 app.whenReady().then(() => {
+  if (process.platform === "darwin") {
+    app.setActivationPolicy("regular");
+    app.dock?.show();
+  }
   Menu.setApplicationMenu(null);
   createMainWindow();
   createLyricWindow();
