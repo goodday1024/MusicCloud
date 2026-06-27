@@ -32,8 +32,10 @@ const REMOTE_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "https://zihan
 
 function installRemoteApiFetch() {
   if (typeof window === "undefined" || window.__caelumShaoRemoteFetchInstalled) return;
-  const isLocalHttpDev = /^https?:$/.test(window.location.protocol) && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname);
-  if (isLocalHttpDev && !import.meta.env.VITE_FORCE_REMOTE_FETCH) {
+  const isHttpPage = /^https?:$/.test(window.location.protocol);
+  const isLocalHttpDev = isHttpPage && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname);
+  const isZihangWeb = isHttpPage && /(^|\.)zihang\.fun$/.test(window.location.hostname);
+  if ((isLocalHttpDev || isZihangWeb) && !import.meta.env.VITE_FORCE_REMOTE_FETCH) {
     window.__caelumShaoRemoteFetchInstalled = true;
     return;
   }
@@ -1997,6 +1999,21 @@ function App() {
       ].filter((item) => item.segment?.text)
     };
   }, [audioTime, lyricSegments]);
+
+  useEffect(() => {
+    if (!window.caelumShaoDesktop?.isDesktop) return;
+    if (!lyricDisplay?.lines?.length) {
+      window.caelumShaoDesktop.hideFloatingLyric?.();
+      return;
+    }
+    window.caelumShaoDesktop.updateFloatingLyric?.({
+      progress: lyricDisplay.progress || 0,
+      lines: lyricDisplay.lines.map(({ segment, role }) => ({
+        role,
+        text: segment?.text || ""
+      }))
+    });
+  }, [lyricDisplay]);
 
   useEffect(() => {
     if (sceneMode !== "earth") return;

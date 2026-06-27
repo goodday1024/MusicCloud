@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>云韶悬浮歌词</title>
+    <style>
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: transparent;
+        -webkit-app-region: drag;
+        user-select: none;
+      }
+
+      body {
+        display: grid;
+        place-items: center;
+        font-family: "Kaiti SC", "STKaiti", KaiTi, "Songti SC", serif;
+      }
+
+      .lyrics {
+        --lyric-progress: 0%;
+        width: 100%;
+        display: grid;
+        gap: 2px;
+        place-items: center;
+        padding: 6px 24px;
+        box-sizing: border-box;
+      }
+
+      .row {
+        max-width: 100%;
+        min-height: 28px;
+        display: grid;
+        place-items: center;
+        opacity: 0.62;
+        transform: translateY(2px) scale(0.94);
+        transition: opacity 0.42s ease, transform 0.42s cubic-bezier(0.2, 0.75, 0.18, 1);
+      }
+
+      .row span {
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: rgba(255, 231, 145, 0.68);
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-align: center;
+        text-shadow:
+          0 3px 12px rgba(0, 0, 0, 0.78),
+          0 0 18px rgba(255, 193, 70, 0.18);
+      }
+
+      .row.past span {
+        background: linear-gradient(90deg, rgba(176, 118, 35, 0.72), rgba(211, 154, 48, 0.7), rgba(156, 101, 28, 0.68));
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+
+      .row.future span {
+        background: linear-gradient(90deg, rgba(255, 246, 183, 0.72), rgba(255, 220, 103, 0.68), rgba(255, 238, 151, 0.7));
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+
+      .row.current {
+        min-height: 42px;
+        opacity: 1;
+        transform: translateY(0) scale(1);
+        filter:
+          drop-shadow(0 0 18px rgba(255, 210, 122, 0.22))
+          drop-shadow(0 0 28px rgba(255, 186, 72, 0.16));
+      }
+
+      .row.current span {
+        font-size: 30px;
+        font-weight: 900;
+        background:
+          linear-gradient(90deg, rgba(194, 128, 30, 0.98) 0%, rgba(224, 158, 43, 0.97) 24%, rgba(164, 101, 22, 0.96) var(--lyric-progress), rgba(255, 244, 174, 0.99) var(--lyric-progress), rgba(255, 214, 78, 0.98) 72%, rgba(255, 236, 137, 0.98) 100%);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        background-size: 125% 100%;
+        animation: glow 4.8s ease-in-out infinite alternate;
+      }
+
+      @keyframes glow {
+        from {
+          background-position: 0% 50%;
+        }
+        to {
+          background-position: 100% 50%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="lyrics" id="lyrics"></div>
+    <script>
+      const root = document.getElementById("lyrics");
+      window.floatingLyrics.onUpdate((payload) => {
+        root.style.setProperty("--lyric-progress", `${Math.round((payload.progress || 0) * 100)}%`);
+        root.innerHTML = "";
+        for (const line of payload.lines || []) {
+          const row = document.createElement("div");
+          row.className = `row ${line.role || ""}`;
+          const span = document.createElement("span");
+          span.textContent = line.text || "";
+          row.appendChild(span);
+          root.appendChild(row);
+        }
+      });
+    </script>
+  </body>
+</html>
