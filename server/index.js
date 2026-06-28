@@ -840,6 +840,14 @@ function authToken() {
   return crypto.randomBytes(28).toString("base64url");
 }
 
+function accountPersistenceUnavailable() {
+  return Boolean(isVercel && blobPersistenceDisabledReason);
+}
+
+function accountPersistenceUnavailableMessage() {
+  return `云韶账号存储暂不可用：${blobPersistenceDisabledReason || "Vercel Blob 不可用"}。请先恢复 Vercel Blob Store，或改用数据库持久化。`;
+}
+
 function normalizeUsers(payload = {}) {
   return {
     users: Array.isArray(payload.users) ? payload.users : [],
@@ -4615,6 +4623,10 @@ app.post("/api/account/register", async (req, res, next) => {
       return;
     }
     const data = await readUsers();
+    if (accountPersistenceUnavailable()) {
+      res.status(503).json({ error: accountPersistenceUnavailableMessage() });
+      return;
+    }
     if (data.users.some((user) => user.username === username)) {
       res.status(409).json({ error: "该云韶账号已存在" });
       return;
@@ -4649,6 +4661,10 @@ app.post("/api/account/login", async (req, res, next) => {
     const username = cleanText(req.body?.username, 64).toLowerCase();
     const password = String(req.body?.password || "");
     const data = await readUsers();
+    if (accountPersistenceUnavailable()) {
+      res.status(503).json({ error: accountPersistenceUnavailableMessage() });
+      return;
+    }
     const user = data.users.find((item) => item.username === username);
     if (!user || !verifyPassword(password, user)) {
       res.status(401).json({ error: "账号或密码不正确" });
@@ -4657,7 +4673,7 @@ app.post("/api/account/login", async (req, res, next) => {
     const token = authToken();
     data.sessions[token] = user.id;
     await saveUsers(data);
-    res.json({ token, user: publicUser(user), savedTracks: user.savedTracks || [], history: user.history || [] });
+    res.json({ token, user: publicUser(user), savedTracks: user.savedTracks || [], history: user.history || [], syncedTracks: user.syncedTracks || [] });
   } catch (error) {
     next(error);
   }

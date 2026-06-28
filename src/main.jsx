@@ -19,6 +19,7 @@ const ADMIN_PASSWORD_KEY = "caelumshao.adminPassword.v1";
 const ACCOUNT_TOKEN_KEY = "caelumshao.accountToken.v1";
 const DEVICE_ID_KEY = "caelumshao.deviceId.v1";
 const APP_VERSION_KEY = "caelumshao.appVersion.v1";
+const SPLASH_SEEN_KEY = "caelumshao.splashSeen.v1";
 const DEFAULT_ADMIN_PASSWORD = "admin123456";
 const RENDER_LIMITS = {
   low: { tracks: 360, dust: 3200, mist: 360 },
@@ -1811,8 +1812,10 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [lyricSegments, setLyricSegments] = useState([]);
   const [lyricPosition, setLyricPosition] = useState(() => readLyricPosition());
+  const [desktopLyricMode, setDesktopLyricMode] = useState("floating");
   const [energy, setEnergy] = useState(0.08);
   const [message, setMessage] = useState("");
+  const [splashVisible, setSplashVisible] = useState(() => localStorage.getItem(SPLASH_SEEN_KEY) !== "true");
   const [isLibraryLoading, setIsLibraryLoading] = useState(false);
   const [viewMode, setViewMode] = useState("歌手");
   const [sceneMode, setSceneMode] = useState("nebula");
@@ -2023,6 +2026,10 @@ function App() {
 
   useEffect(() => {
     if (!window.caelumShaoDesktop?.isDesktop) return;
+    if (desktopLyricMode !== "floating") {
+      window.caelumShaoDesktop.hideFloatingLyric?.();
+      return;
+    }
     if (!lyricDisplay?.lines?.length) {
       window.caelumShaoDesktop.hideFloatingLyric?.();
       return;
@@ -2034,7 +2041,14 @@ function App() {
         text: segment?.text || ""
       }))
     });
-  }, [lyricDisplay]);
+  }, [desktopLyricMode, lyricDisplay]);
+
+  useEffect(() => {
+    if (!window.caelumShaoDesktop?.isDesktop) return undefined;
+    return window.caelumShaoDesktop.onFloatingLyricReturn?.(() => {
+      setDesktopLyricMode("inline");
+    });
+  }, []);
 
   useEffect(() => {
     if (sceneMode !== "earth") return;
@@ -2654,7 +2668,8 @@ function App() {
       pointerId: event.pointerId,
       x: event.clientX,
       y: event.clientY,
-      position: lyricPosition
+      position: lyricPosition,
+      moved: false
     };
     lyricDragRef.current = start;
     event.currentTarget.setPointerCapture?.(event.pointerId);
@@ -2667,18 +2682,28 @@ function App() {
       x: Math.max(8, Math.min(92, drag.position.x + ((event.clientX - drag.x) / Math.max(1, window.innerWidth)) * 100)),
       y: Math.max(8, Math.min(86, drag.position.y + ((event.clientY - drag.y) / Math.max(1, window.innerHeight)) * 100))
     };
+    if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 8) drag.moved = true;
     setLyricPosition(next);
   }
 
   function endLyricDrag(event) {
     const drag = lyricDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
+    const moved = Boolean(drag.moved);
     lyricDragRef.current = null;
     event.currentTarget.releasePointerCapture?.(event.pointerId);
     setLyricPosition((position) => {
       localStorage.setItem(LYRIC_POSITION_KEY, JSON.stringify(position));
       return position;
     });
+    if (!moved && window.caelumShaoDesktop?.isDesktop) {
+      restoreFloatingLyric();
+    }
+  }
+
+  function restoreFloatingLyric() {
+    if (!window.caelumShaoDesktop?.isDesktop) return;
+    setDesktopLyricMode("floating");
   }
 
   async function publishTogetherTrack(track) {
@@ -3387,6 +3412,11 @@ function App() {
     flash.timer = window.setTimeout(() => setToast(""), 2200);
   }
 
+  function dismissSplash() {
+    localStorage.setItem(SPLASH_SEEN_KEY, "true");
+    setSplashVisible(false);
+  }
+
   async function openLoginPanel(mode = "qr") {
     setLoginOpen(true);
     setLoginProvider("netease");
@@ -4029,8 +4059,63 @@ function App() {
     </section>
   );
 
+  const splashOverlay = splashVisible && !isAdminRoute && (
+    <section className="splash-overlay" aria-label="云韶启动介绍">
+      <div className="splash-stars" />
+      <div className="splash-orbit splash-orbit-a" />
+      <div className="splash-orbit splash-orbit-b" />
+      <div className="splash-core">
+        <div className="splash-halo" />
+        <div className="splash-brand-mark">
+          <span>韶</span>
+        </div>
+      </div>
+      <div className="splash-copy">
+        <div className="splash-kicker">CaelumShao Music Agent</div>
+        <h1>云韶</h1>
+        <p>把你的歌单化成一片会发光的星云，在音乐、歌词、播客和共同聆听之间自由穿梭。</p>
+      </div>
+      <div className="splash-feature-grid" aria-label="功能介绍">
+        <div className="splash-feature">
+          <span>01</span>
+          <strong>星云歌图</strong>
+          <p>歌曲化为星点，搜索会飞向目标星团，点击即播。</p>
+        </div>
+        <div className="splash-feature">
+          <span>02</span>
+          <strong>音乐账号</strong>
+          <p>绑定网易云与 QQ 音乐，同步歌单与歌曲宇宙。</p>
+        </div>
+        <div className="splash-feature">
+          <span>03</span>
+          <strong>AI 播客</strong>
+          <p>可选播客旁白，结合歌曲信息生成解读。</p>
+        </div>
+        <div className="splash-feature">
+          <span>04</span>
+          <strong>悬浮歌词</strong>
+          <p>桌面端歌词悬浮在其他应用上方，跟随进度滚动。</p>
+        </div>
+        <div className="splash-feature">
+          <span>05</span>
+          <strong>一起听</strong>
+          <p>创建房间，同步播放、暂停、进度与聊天。</p>
+        </div>
+        <div className="splash-feature">
+          <span>06</span>
+          <strong>拾遗与历史</strong>
+          <p>保存最近播放和拾遗，多设备同步你的音乐轨迹。</p>
+        </div>
+      </div>
+      <div className="splash-actions">
+        <button type="button" onClick={dismissSplash}>进入云韶</button>
+      </div>
+    </section>
+  );
+
   return (
     <main className="app cloud-stage">
+      {splashOverlay}
       {!cloudUser ? (
         <section className="invite-gate">
           <div className="invite-card">
@@ -4055,7 +4140,7 @@ function App() {
       ) : (
       <>
       <div className="space-field" />
-      {!isDesktopApp && lyricDisplay?.lines?.length > 0 && (
+      {(!isDesktopApp || desktopLyricMode === "inline") && lyricDisplay?.lines?.length > 0 && (
         <div
           className="top-lyric"
           aria-live="polite"

@@ -106,6 +106,9 @@
     <div class="lyrics" id="lyrics"></div>
     <script>
       const root = document.getElementById("lyrics");
+      root.addEventListener("click", () => {
+        window.floatingLyrics.returnToApp();
+      });
       window.floatingLyrics.onUpdate((payload) => {
         root.style.setProperty("--lyric-progress", `${Math.round((payload.progress || 0) * 100)}%`);
         root.innerHTML = "";

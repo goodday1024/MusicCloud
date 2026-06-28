@@ -146,6 +146,15 @@ ipcMain.on("floating-lyric:hide", () => {
   if (lyricWindow && !lyricWindow.isDestroyed()) lyricWindow.hide();
 });
 
+ipcMain.on("floating-lyric:return-to-app", () => {
+  if (lyricWindow && !lyricWindow.isDestroyed()) lyricWindow.hide();
+  const win = createMainWindow();
+  win.show();
+  if (win.isMinimized()) win.restore();
+  win.focus();
+  win.webContents.send("floating-lyric:return-to-app");
+});
+
 ipcMain.handle("account-token:get", () => readDesktopSession().accountToken || "");
 
 ipcMain.handle("account-token:set", (_event, token = "") => {

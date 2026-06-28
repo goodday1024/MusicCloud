@@ -14,7 +14,7 @@
     "server": "node server/index.js",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "prepare:electron": "rm -rf .electron-pack && mkdir -p .electron-pack && cp -R dist electron .electron-pack/ && cp electron/package.json .electron-pack/package.json",
+    "prepare:electron": "rm -rf .electron-pack && mkdir -p .electron-pack && cp -R dist electron build .electron-pack/ && cp electron/package.json .electron-pack/package.json",
     "pack:mac": "npm run build && npm run prepare:electron && electron-builder --projectDir .electron-pack --mac --dir",
     "dist:mac": "npm run build && npm run prepare:electron && electron-builder --projectDir .electron-pack --mac"
   },
@@ -39,6 +39,7 @@
     },
     "mac": {
       "category": "public.app-category.music",
+      "icon": "build/icon.icns",
       "target": [
         "dmg",
         "zip"

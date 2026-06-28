@@ -9,6 +9,11 @@ contextBridge.exposeInMainWorld("caelumShaoDesktop", {
   hideFloatingLyric() {
     ipcRenderer.send("floating-lyric:hide");
   },
+  onFloatingLyricReturn(callback) {
+    const listener = () => callback();
+    ipcRenderer.on("floating-lyric:return-to-app", listener);
+    return () => ipcRenderer.removeListener("floating-lyric:return-to-app", listener);
+  },
   getAccountToken() {
     return ipcRenderer.invoke("account-token:get");
   },
