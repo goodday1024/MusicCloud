@@ -73,6 +73,19 @@ function installRemoteApiFetch() {
 
 installRemoteApiFetch();
 
+function buildMusicProxyUrl(rawUrl) {
+  const targetUrl = String(rawUrl || "").trim();
+  if (!/^https?:\/\//i.test(targetUrl)) return "";
+  const proxyPath = `/api/music/proxy?url=${encodeURIComponent(targetUrl)}`;
+  if (typeof window === "undefined") return proxyPath;
+  const isHttpPage = /^https?:$/.test(window.location.protocol);
+  const isLocalHttpDev = isHttpPage && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname);
+  const isZihangWeb = isHttpPage && /(^|\.)zihang\.fun$/.test(window.location.hostname);
+  return isHttpPage && (isLocalHttpDev || isZihangWeb)
+    ? proxyPath
+    : `${REMOTE_API_BASE_URL}${proxyPath}`;
+}
+
 function trackKey(track) {
   if (!track) return "";
   return String(track.libraryKey || track.id || track.podcastAudioUrl || track.musicUrl || `${track.title || ""}-${track.artist || ""}`);
@@ -3339,8 +3352,9 @@ function App() {
     setMessage(`正在准备播放 ${index + 1}/${queue.length || 1}`);
 
     const playSourceNow = (nextSource, nextMessage = "") => {
-      if (token !== playTokenRef.current || !nextSource) return false;
-      setPlayerSource(nextSource);
+      const playableSource = buildMusicProxyUrl(nextSource);
+      if (token !== playTokenRef.current || !playableSource) return false;
+      setPlayerSource(playableSource);
       setMessage(nextMessage);
       window.setTimeout(() => {
         if (audioRef.current) audioRef.current.volume = 1;

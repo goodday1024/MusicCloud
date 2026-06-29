@@ -399,6 +399,53 @@ app.get("/media/blob/*", async (req, res, next) => {
   }
 });
 
+app.get("/api/music/proxy", async (req, res, next) => {
+  try {
+    const targetUrl = String(req.query?.url || "").trim();
+    if (!isPlayableMusicUrl(targetUrl)) {
+      res.status(400).json({ error: "缺少可播放音频链接" });
+      return;
+    }
+    const upstream = await fetch(targetUrl, {
+      headers: {
+        ...musicDownloadHeaders(targetUrl),
+        ...(req.headers.range ? { Range: String(req.headers.range) } : {})
+      }
+    });
+    if (!upstream.ok && upstream.status !== 206) {
+      res.status(upstream.status || 502).json({ error: `音频代理失败：${upstream.status}` });
+      return;
+    }
+    const passthroughHeaders = [
+      "content-type",
+      "content-length",
+      "content-range",
+      "accept-ranges",
+      "cache-control",
+      "etag",
+      "last-modified"
+    ];
+    for (const headerName of passthroughHeaders) {
+      const value = upstream.headers.get(headerName);
+      if (value) res.setHeader(headerName, value);
+    }
+    if (!res.getHeader("cache-control")) {
+      res.setHeader("Cache-Control", "public, max-age=300");
+    }
+    if (!res.getHeader("accept-ranges")) {
+      res.setHeader("Accept-Ranges", "bytes");
+    }
+    res.status(upstream.status === 206 ? 206 : 200);
+    if (!upstream.body) {
+      res.end();
+      return;
+    }
+    Readable.fromWeb(upstream.body).pipe(res);
+  } catch (error) {
+    next(error);
+  }
+});
+
 const defaultMemory = {
   profile: {
     favoriteScenes: [],
