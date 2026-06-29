@@ -364,8 +364,10 @@ app.use(
       ? { origin: process.env.CORS_ORIGIN.split(",").map((item) => item.trim()).filter(Boolean), credentials: true }
       : {
           origin: [
-            /^http:\/\/localhost:517\d$/,
-            /^http:\/\/127\.0\.0\.1:517\d$/,
+            /^http:\/\/localhost(?::\d+)?$/,
+            /^http:\/\/127\.0\.0\.1(?::\d+)?$/,
+            /^capacitor:\/\/localhost$/,
+            /^ionic:\/\/localhost$/,
             "https://zihang.fun",
             "https://www.zihang.fun",
             "file://"
