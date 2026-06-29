@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { Capacitor, registerPlugin } from "@capacitor/core";
 import * as THREE from "three";
 import ThreeGlobe from "three-globe";
 import "./styles.css";
@@ -30,6 +31,7 @@ const GLOBAL_RENDER_LIMITS = {
   high: { tracks: 1800, dust: 24000, mist: 3200 }
 };
 const REMOTE_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "https://www.zihang.fun").replace(/\/$/, "");
+const NativeAudioPlayer = registerPlugin("NativeAudioPlayer");
 let silentAudioUrlCache = "";
 
 function installRemoteApiFetch() {
@@ -85,10 +87,10 @@ function getSilentAudioUrl() {
   return silentAudioUrlCache;
 }
 
-function buildMusicProxyUrl(rawUrl) {
+function buildMusicProxyUrl(rawUrl, { native = false } = {}) {
   const targetUrl = String(rawUrl || "").trim();
   if (!/^https?:\/\//i.test(targetUrl)) return "";
-  const proxyPath = `/api/music/proxy?url=${encodeURIComponent(targetUrl)}`;
+  const proxyPath = `/api/music/proxy?url=${encodeURIComponent(targetUrl)}${native ? "&native=1" : ""}`;
   if (typeof window === "undefined") return proxyPath;
   const isHttpPage = /^https?:$/.test(window.location.protocol);
   const isLocalHttpDev = isHttpPage && /^(localhost|127\.0\.0\.1)$/.test(window.location.hostname);
@@ -104,6 +106,26 @@ function currentPlaybackCompatibilityMode() {
   const protocol = String(window.location.protocol || "").toLowerCase();
   if (protocol === "capacitor:" || protocol === "ionic:") return "ios-webview";
   return "";
+}
+
+function audioContainerExtension(url) {
+  if (!url) return "";
+  try {
+    const pathname = new URL(String(url), window.location.href).pathname.toLowerCase();
+    const match = pathname.match(/\.([a-z0-9]+)$/i);
+    return match?.[1] || "";
+  } catch (_error) {
+    return "";
+  }
+}
+
+function isIosNativeWebView() {
+  return currentPlaybackCompatibilityMode() === "ios-webview" && Capacitor.getPlatform?.() === "ios";
+}
+
+function shouldUseNativeMusicPlayback(url) {
+  if (!isIosNativeWebView()) return false;
+  return ["flac", "mflac"].includes(audioContainerExtension(url));
 }
 
 function trackKey(track) {
@@ -1853,6 +1875,7 @@ function App() {
   const [trackQueue, setTrackQueue] = useState([]);
   const [queueIndex, setQueueIndex] = useState(-1);
   const [playerSource, setPlayerSource] = useState("");
+  const [nativePlaybackActive, setNativePlaybackActive] = useState(false);
   const [playerTitle, setPlayerTitle] = useState(BRAND_CN);
   const [playerArtist, setPlayerArtist] = useState("click a golden song point");
   const [audioTime, setAudioTime] = useState(0);
@@ -1995,6 +2018,63 @@ function App() {
   const lyricDragRef = useRef(null);
   const audioUnlockedRef = useRef(false);
   const audioUnlockingRef = useRef(false);
+  const nativePlaybackActiveRef = useRef(false);
+  const nativePlaybackStateRef = useRef({
+    currentTime: 0,
+    duration: 0,
+    playing: false,
+    volume: 1
+  });
+
+  function currentMusicPlaybackTime() {
+    return nativePlaybackActiveRef.current
+      ? Number(nativePlaybackStateRef.current.currentTime || 0)
+      : Number(audioRef.current?.currentTime || 0);
+  }
+
+  async function setMusicPlaybackVolume(volume) {
+    const nextVolume = Math.max(0, Math.min(1, Number.isFinite(Number(volume)) ? Number(volume) : 1));
+    nativePlaybackStateRef.current = {
+      ...nativePlaybackStateRef.current,
+      volume: nextVolume
+    };
+    if (nativePlaybackActiveRef.current) {
+      try {
+        await NativeAudioPlayer.setVolume({ volume: nextVolume });
+      } catch (error) {
+        console.warn("native audio setVolume failed:", error?.message || error);
+      }
+      return;
+    }
+    if (audioRef.current) audioRef.current.volume = nextVolume;
+  }
+
+  async function stopNativePlayback() {
+    if (!isIosNativeWebView()) return;
+    try {
+      await NativeAudioPlayer.stop();
+    } catch (_error) {
+      // Ignore stop failures when the plugin is not active yet.
+    }
+  }
+
+  async function seekMusicPlayback(nextTime) {
+    const targetTime = Math.max(0, Number(nextTime) || 0);
+    if (nativePlaybackActiveRef.current) {
+      nativePlaybackStateRef.current = {
+        ...nativePlaybackStateRef.current,
+        currentTime: targetTime
+      };
+      setAudioTime(targetTime);
+      await NativeAudioPlayer.seekTo({ time: targetTime });
+      return targetTime;
+    }
+    const audio = audioRef.current;
+    if (!audio) return 0;
+    audio.currentTime = targetTime;
+    setAudioTime(audio.currentTime || 0);
+    return audio.currentTime || 0;
+  }
 
   const isNeteaseLoggedIn = Boolean(neteaseState?.loggedIn && (neteaseState?.uid || neteaseState?.profile?.userId || neteaseState?.profile?.nickname || neteaseState?.cookies?.length));
   const isQqMusicLoggedIn = Boolean(qqMusicState?.loggedIn && (qqMusicState?.uin || qqMusicState?.profile?.nick || qqMusicState?.profile?.creator?.hostname || qqMusicState?.provider === "QQMusicApi1" || qqMusicState?.cookies?.length));
@@ -2565,15 +2645,27 @@ function App() {
         const sameTrack = currentTrackRef.current && trackKey(currentTrackRef.current) === trackKey(remoteTrack);
         if (!sameTrack) await playTrackFromUi(remoteTrack, { focus: false, fromTogether: true });
         window.setTimeout(() => {
-          const audio = audioRef.current;
-          if (!audio) return;
           suppressPlaybackStateRef.current = true;
-          if (Number.isFinite(remoteTime) && Math.abs((audio.currentTime || 0) - remoteTime) > 0.45) audio.currentTime = remoteTime;
-          if (data.nowPlaying?.playing) audio.play().catch(() => null);
-          else audio.pause();
-          window.setTimeout(() => {
-            suppressPlaybackStateRef.current = false;
-          }, 360);
+          void (async () => {
+            try {
+              if (Number.isFinite(remoteTime) && Math.abs(currentMusicPlaybackTime() - remoteTime) > 0.45) {
+                await seekMusicPlayback(remoteTime).catch(() => null);
+              }
+              if (nativePlaybackActiveRef.current) {
+                if (data.nowPlaying?.playing) await NativeAudioPlayer.resume().catch(() => null);
+                else await NativeAudioPlayer.pause().catch(() => null);
+              } else {
+                const audio = audioRef.current;
+                if (!audio) return;
+                if (data.nowPlaying?.playing) await audio.play().catch(() => null);
+                else audio.pause();
+              }
+            } finally {
+              window.setTimeout(() => {
+                suppressPlaybackStateRef.current = false;
+              }, 360);
+            }
+          })();
         }, sameTrack ? 0 : 180);
         window.setTimeout(() => {
           suppressTogetherPublishRef.current = false;
@@ -2586,7 +2678,7 @@ function App() {
     }
   }
 
-  async function publishTogetherPlaybackState({ playing = isPlaying, currentTime = audioRef.current?.currentTime || 0, force = false } = {}) {
+  async function publishTogetherPlaybackState({ playing = isPlaying, currentTime = currentMusicPlaybackTime(), force = false } = {}) {
     if (!accountToken || !togetherRoom || suppressTogetherPublishRef.current || suppressPlaybackStateRef.current || !currentTrackRef.current) return;
     const now = Date.now();
     if (!force && now - lastPlaybackPublishRef.current < 420) return;
@@ -3163,23 +3255,7 @@ function App() {
     };
     const onMeta = () => setAudioDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
     const onError = () => setMessage(describePlaybackError(null, audio));
-    const onEnded = () => {
-      if (singleLoop) {
-        audio.currentTime = 0;
-        setAudioTime(0);
-        const track = currentTrackRef.current || queueRef.current[queueIndexRef.current] || selectedTrack;
-        if (track && !lyricSegmentsRef.current.length) void loadLyricsForTrack(track, playTokenRef.current);
-        void attemptAudioPlay(audio, "循环播放失败");
-        return;
-      }
-      const nextIndex = queueIndexRef.current + 1;
-      if (nextIndex < queueRef.current.length) {
-        void playQueueTrack(nextIndex, { autoAdvance: true });
-      } else {
-        setIsPlaying(false);
-        setMessage("播放完成");
-      }
-    };
+    const onEnded = () => void handleTrackEnded();
 
     audio.addEventListener("timeupdate", onTime);
     audio.addEventListener("play", onPlay);
@@ -3198,6 +3274,52 @@ function App() {
       audio.removeEventListener("ended", onEnded);
     };
   }, [isLoggedIn, playerSource, singleLoop]);
+
+  useEffect(() => {
+    if (!isIosNativeWebView()) return undefined;
+    let released = false;
+    let listenerHandle = null;
+    NativeAudioPlayer.addListener("stateChange", (payload) => {
+      if (released) return;
+      const nextState = {
+        ...nativePlaybackStateRef.current
+      };
+      if (Number.isFinite(Number(payload?.currentTime))) nextState.currentTime = Number(payload.currentTime || 0);
+      if (Number.isFinite(Number(payload?.duration))) nextState.duration = Number(payload.duration || 0);
+      if (typeof payload?.playing === "boolean") nextState.playing = payload.playing;
+      nativePlaybackStateRef.current = nextState;
+      if (Number.isFinite(nextState.currentTime)) setAudioTime(nextState.currentTime);
+      if (Number.isFinite(nextState.duration)) setAudioDuration(nextState.duration);
+      if (typeof payload?.playing === "boolean") setIsPlaying(payload.playing);
+      if (payload?.error) {
+        setMessage(String(payload.error));
+        setIsPlaying(false);
+      }
+      if (nativePlaybackActiveRef.current && (typeof payload?.playing === "boolean" || Number.isFinite(Number(payload?.currentTime)))) {
+        void publishTogetherPlaybackState({
+          playing: typeof payload?.playing === "boolean" ? payload.playing : nextState.playing,
+          currentTime: nextState.currentTime,
+          force: Boolean(payload?.forceSync)
+        });
+      }
+      if (payload?.ended) {
+        setIsPlaying(false);
+        void handleTrackEnded();
+      }
+    }).then((handle) => {
+      listenerHandle = handle;
+    }).catch((error) => {
+      console.warn("native audio listener unavailable:", error?.message || error);
+    });
+    return () => {
+      released = true;
+      listenerHandle?.remove?.();
+    };
+  }, [singleLoop]);
+
+  useEffect(() => () => {
+    void stopNativePlayback();
+  }, []);
 
   useEffect(() => {
     const handleUnlock = () => {
@@ -3256,7 +3378,45 @@ function App() {
       podcastAudio.removeAttribute("src");
       podcastAudio.load?.();
     }
-    if (audioRef.current) audioRef.current.volume = 1;
+    void setMusicPlaybackVolume(1);
+  }
+
+  async function handleTrackEnded() {
+    if (singleLoop) {
+      const track = currentTrackRef.current || queueRef.current[queueIndexRef.current] || selectedTrack;
+      if (track && !lyricSegmentsRef.current.length) void loadLyricsForTrack(track, playTokenRef.current);
+      setAudioTime(0);
+      if (nativePlaybackActiveRef.current) {
+        nativePlaybackStateRef.current = {
+          ...nativePlaybackStateRef.current,
+          currentTime: 0,
+          playing: true
+        };
+        try {
+          await NativeAudioPlayer.seekTo({ time: 0 });
+          await NativeAudioPlayer.resume();
+        } catch (error) {
+          setMessage(error?.message || "循环播放失败");
+        }
+        return;
+      }
+      const audio = audioRef.current;
+      if (!audio) return;
+      audio.currentTime = 0;
+      void attemptAudioPlay(audio, "循环播放失败");
+      return;
+    }
+    const nextIndex = queueIndexRef.current + 1;
+    if (nextIndex < queueRef.current.length) {
+      void playQueueTrack(nextIndex, { autoAdvance: true });
+      return;
+    }
+    setIsPlaying(false);
+    nativePlaybackStateRef.current = {
+      ...nativePlaybackStateRef.current,
+      playing: false
+    };
+    setMessage("播放完成");
   }
 
   function describePlaybackError(error, audio) {
@@ -3377,9 +3537,8 @@ function App() {
 
   async function startTtsPodcastOverlay(track, token) {
     if (!track || !podcastEnabledRef.current) return;
-    const musicAudio = audioRef.current;
     const podcastAudio = podcastAudioRef.current;
-    if (!musicAudio || !podcastAudio) {
+    if (!podcastAudio) {
       setMessage("播客音频轨道未就绪");
       return;
     }
@@ -3393,7 +3552,7 @@ function App() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             track,
-            currentTime: musicAudio.currentTime || 0
+            currentTime: currentMusicPlaybackTime()
           })
         });
         data = await readJsonResponse(response);
@@ -3412,13 +3571,13 @@ function App() {
       podcastAudio.src = data.audioUrl;
       podcastAudio.volume = 1;
       podcastAudio.onplay = () => {
-        if (token === playTokenRef.current && audioRef.current) audioRef.current.volume = 0.34;
-        const current = audioRef.current?.currentTime || 0;
+        if (token === playTokenRef.current) void setMusicPlaybackVolume(0.34);
+        const current = currentMusicPlaybackTime();
         const currentLyric = (data.lyricSegments || []).find((segment) => current >= Number(segment.start || 0) && current < Number(segment.end || Number(segment.start || 0) + 4));
         setMessage(currentLyric?.text ? `播客接入当前歌词：${currentLyric.text}` : "播客已叠加，音乐保持播放");
       };
       podcastAudio.onended = podcastAudio.onerror = () => {
-        if (token === playTokenRef.current && audioRef.current) audioRef.current.volume = 1;
+        if (token === playTokenRef.current) void setMusicPlaybackVolume(1);
       };
       await podcastAudio.play();
     } catch (error) {
@@ -3431,7 +3590,7 @@ function App() {
           podcastCacheRef.current = nextCache;
           writeObjectCache(PODCAST_CACHE_KEY, nextCache, 120);
         }
-        if (audioRef.current) audioRef.current.volume = 1;
+        void setMusicPlaybackVolume(1);
         setMessage(error.message || "播客语音接入失败，音乐继续播放");
       }
     }
@@ -3453,16 +3612,43 @@ function App() {
     setLyricSegments([]);
     setMessage(`正在准备播放 ${index + 1}/${queue.length || 1}`);
 
-    const playSourceNow = (nextSource, nextMessage = "") => {
-      const playableSource = buildMusicProxyUrl(nextSource);
+    const playSourceNow = async (nextSource, nextMessage = "") => {
+      const useNativePlayback = shouldUseNativeMusicPlayback(nextSource);
+      const playableSource = buildMusicProxyUrl(nextSource, { native: useNativePlayback });
       if (token !== playTokenRef.current || !playableSource) return false;
+      nativePlaybackActiveRef.current = useNativePlayback;
+      setNativePlaybackActive(useNativePlayback);
+      nativePlaybackStateRef.current = {
+        ...nativePlaybackStateRef.current,
+        currentTime: 0,
+        duration: 0,
+        playing: false,
+        volume: 1
+      };
       setPlayerSource(playableSource);
       setMessage(nextMessage);
-      window.setTimeout(() => {
-        if (audioRef.current) audioRef.current.volume = 1;
-        audioRef.current?.load?.();
-        void attemptAudioPlay(audioRef.current, "音频播放失败");
-      }, 80);
+      setAudioTime(0);
+      setAudioDuration(0);
+      setIsPlaying(false);
+      if (useNativePlayback) {
+        const audio = audioRef.current;
+        audio?.pause();
+        audio?.removeAttribute("src");
+        audio?.load?.();
+        await NativeAudioPlayer.play({
+          url: playableSource,
+          title: track.title || "",
+          artist: track.artist || ""
+        });
+        await setMusicPlaybackVolume(1);
+        return true;
+      }
+      await stopNativePlayback();
+      await new Promise((resolve) => window.setTimeout(resolve, 80));
+      await setMusicPlaybackVolume(1);
+      audioRef.current?.load?.();
+      const started = await attemptAudioPlay(audioRef.current, "音频播放失败");
+      if (!started) throw new Error("音频播放失败");
       return true;
     };
 
@@ -3472,7 +3658,7 @@ function App() {
       const playMessage = podcastEnabledRef.current
         ? `音乐已播放 ${index + 1}/${queue.length || 1}，正在后台生成播客`
         : `音乐已播放 ${index + 1}/${queue.length || 1}`;
-      const started = playSourceNow(originalUrl, playMessage);
+      const started = await playSourceNow(originalUrl, playMessage);
       if (started) {
         queue[index] = { ...track, musicUrl: originalUrl };
         queueRef.current = [...queue];
@@ -3487,6 +3673,8 @@ function App() {
       }
     } catch (error) {
       console.warn("quick original playback failed:", error?.message || error);
+      nativePlaybackActiveRef.current = false;
+      setNativePlaybackActive(false);
       if (options.autoAdvance && index + 1 < queueRef.current.length) {
         setMessage(`跳过无法播放的歌曲：${track.title || "未知歌曲"}`);
         return playQueueTrack(index + 1, options);
@@ -3521,6 +3709,11 @@ function App() {
   }
 
   function togglePlayback() {
+    if (nativePlaybackActiveRef.current) {
+      if (nativePlaybackStateRef.current.playing) void NativeAudioPlayer.pause();
+      else void NativeAudioPlayer.resume().catch((error) => setMessage(error?.message || "原生音频播放失败"));
+      return;
+    }
     const audio = audioRef.current;
     if (!audio) return;
     void unlockAudioPlayback();
@@ -3529,12 +3722,18 @@ function App() {
   }
 
   function seek(event) {
-    const audio = audioRef.current;
-    if (!audio || !audioDuration) return;
+    if (!audioDuration) return;
     const next = Number(event.target.value);
-    audio.currentTime = (next / 100) * audioDuration;
-    setAudioTime(audio.currentTime);
-    void publishTogetherPlaybackState({ playing: !audio.paused, currentTime: audio.currentTime || 0, force: true });
+    const nextTime = (next / 100) * audioDuration;
+    void seekMusicPlayback(nextTime)
+      .then((currentTime) => {
+        void publishTogetherPlaybackState({
+          playing: nativePlaybackActiveRef.current ? nativePlaybackStateRef.current.playing : Boolean(audioRef.current && !audioRef.current.paused),
+          currentTime,
+          force: true
+        });
+      })
+      .catch((error) => setMessage(error?.message || "定位播放进度失败"));
   }
 
   function flash(text) {
@@ -4696,7 +4895,7 @@ function App() {
       </footer>
       )}
 
-      <audio ref={audioRef} src={playerSource || undefined} preload="auto" />
+      <audio ref={audioRef} src={nativePlaybackActive ? undefined : playerSource || undefined} preload="auto" />
       <audio ref={podcastAudioRef} preload="auto" />
       </>
       )}

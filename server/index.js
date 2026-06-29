@@ -402,6 +402,7 @@ app.get("/media/blob/*", async (req, res, next) => {
 app.get("/api/music/proxy", async (req, res, next) => {
   try {
     const targetUrl = String(req.query?.url || "").trim();
+    const prefersNativeContainer = /^(1|true|yes)$/i.test(String(req.query?.native || "").trim());
     if (!isPlayableMusicUrl(targetUrl)) {
       res.status(400).json({ error: "缺少可播放音频链接" });
       return;
@@ -413,14 +414,14 @@ app.get("/api/music/proxy", async (req, res, next) => {
         ...(forwardRange && requestedRange ? { Range: requestedRange } : {})
       }
     });
-    const shouldSkipRangeProbe = shouldTranscodeMusicProxy({ url: targetUrl });
+    const shouldSkipRangeProbe = !prefersNativeContainer && shouldTranscodeMusicProxy({ url: targetUrl });
     let upstream = await fetchUpstream(!shouldSkipRangeProbe);
     if (!upstream.ok && upstream.status !== 206) {
       res.status(upstream.status || 502).json({ error: `音频代理失败：${upstream.status}` });
       return;
     }
     const upstreamContentType = upstream.headers.get("content-type") || "";
-    if (shouldTranscodeMusicProxy({ url: targetUrl, contentType: upstreamContentType })) {
+    if (!prefersNativeContainer && shouldTranscodeMusicProxy({ url: targetUrl, contentType: upstreamContentType })) {
       if (requestedRange && upstream.status === 206) {
         upstream = await fetchUpstream(false);
         if (!upstream.ok) {
