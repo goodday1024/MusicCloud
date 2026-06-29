@@ -30,6 +30,7 @@ const GLOBAL_RENDER_LIMITS = {
   high: { tracks: 1800, dust: 24000, mist: 3200 }
 };
 const REMOTE_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "https://www.zihang.fun").replace(/\/$/, "");
+let silentAudioUrlCache = "";
 
 function installRemoteApiFetch() {
   if (typeof window === "undefined" || window.__caelumShaoRemoteFetchInstalled) return;
@@ -72,6 +73,17 @@ function installRemoteApiFetch() {
 }
 
 installRemoteApiFetch();
+
+function getSilentAudioUrl() {
+  if (silentAudioUrlCache || typeof URL === "undefined" || typeof Blob === "undefined") return silentAudioUrlCache;
+  const wavBytes = new Uint8Array([
+    82, 73, 70, 70, 37, 0, 0, 0, 87, 65, 86, 69, 102, 109, 116, 32,
+    16, 0, 0, 0, 1, 0, 1, 0, 64, 31, 0, 0, 64, 31, 0, 0,
+    1, 0, 8, 0, 100, 97, 116, 97, 1, 0, 0, 0, 128
+  ]);
+  silentAudioUrlCache = URL.createObjectURL(new Blob([wavBytes], { type: "audio/wav" }));
+  return silentAudioUrlCache;
+}
 
 function buildMusicProxyUrl(rawUrl) {
   const targetUrl = String(rawUrl || "").trim();
@@ -1973,6 +1985,8 @@ function App() {
   const suppressPlaybackStateRef = useRef(false);
   const lastPlaybackPublishRef = useRef(0);
   const lyricDragRef = useRef(null);
+  const audioUnlockedRef = useRef(false);
+  const audioUnlockingRef = useRef(false);
 
   const isNeteaseLoggedIn = Boolean(neteaseState?.loggedIn && (neteaseState?.uid || neteaseState?.profile?.userId || neteaseState?.profile?.nickname || neteaseState?.cookies?.length));
   const isQqMusicLoggedIn = Boolean(qqMusicState?.loggedIn && (qqMusicState?.uin || qqMusicState?.profile?.nick || qqMusicState?.profile?.creator?.hostname || qqMusicState?.provider === "QQMusicApi1" || qqMusicState?.cookies?.length));
@@ -3122,6 +3136,9 @@ function App() {
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return undefined;
+    audio.playsInline = true;
+    audio.setAttribute("playsinline", "");
+    audio.setAttribute("webkit-playsinline", "");
     setAudioTime(0);
     setAudioDuration(0);
     setIsPlaying(false);
@@ -3137,13 +3154,14 @@ function App() {
       void publishTogetherPlaybackState({ playing: false, currentTime: audio.currentTime || 0, force: true });
     };
     const onMeta = () => setAudioDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
+    const onError = () => setMessage(describePlaybackError(null, audio));
     const onEnded = () => {
       if (singleLoop) {
         audio.currentTime = 0;
         setAudioTime(0);
         const track = currentTrackRef.current || queueRef.current[queueIndexRef.current] || selectedTrack;
         if (track && !lyricSegmentsRef.current.length) void loadLyricsForTrack(track, playTokenRef.current);
-        audio.play().catch(() => null);
+        void attemptAudioPlay(audio, "循环播放失败");
         return;
       }
       const nextIndex = queueIndexRef.current + 1;
@@ -3160,6 +3178,7 @@ function App() {
     audio.addEventListener("pause", onPause);
     audio.addEventListener("loadedmetadata", onMeta);
     audio.addEventListener("durationchange", onMeta);
+    audio.addEventListener("error", onError);
     audio.addEventListener("ended", onEnded);
     return () => {
       audio.removeEventListener("timeupdate", onTime);
@@ -3167,9 +3186,18 @@ function App() {
       audio.removeEventListener("pause", onPause);
       audio.removeEventListener("loadedmetadata", onMeta);
       audio.removeEventListener("durationchange", onMeta);
+      audio.removeEventListener("error", onError);
       audio.removeEventListener("ended", onEnded);
     };
   }, [isLoggedIn, playerSource, singleLoop]);
+
+  useEffect(() => {
+    const handleUnlock = () => {
+      void unlockAudioPlayback();
+    };
+    window.addEventListener("pointerdown", handleUnlock, true);
+    return () => window.removeEventListener("pointerdown", handleUnlock, true);
+  }, []);
 
   useEffect(() => {
     let raf = 0;
@@ -3221,6 +3249,71 @@ function App() {
       podcastAudio.load?.();
     }
     if (audioRef.current) audioRef.current.volume = 1;
+  }
+
+  function describePlaybackError(error, audio) {
+    const mediaError = audio?.error;
+    if (mediaError?.code === 1) return "播放已被中止";
+    if (mediaError?.code === 2) return "音频加载失败，请检查网络或代理链路";
+    if (mediaError?.code === 3) return "音频解码失败，可能是不兼容的音频格式";
+    if (mediaError?.code === 4) return "当前歌曲链接不可播放或格式不受支持";
+    if (error?.name === "NotAllowedError") return "iPhone 尚未授权自动播放，请先点一次 Play 再试";
+    if (error?.name === "NotSupportedError") return "当前歌曲链接不可播放或格式不受支持";
+    if (error?.name === "AbortError") return "音频仍在准备中，请再试一次";
+    return error?.message || "音频播放失败";
+  }
+
+  async function unlockAudioElement(element) {
+    if (!element) return;
+    const originalSrc = element.getAttribute("src") || "";
+    const originalMuted = element.muted;
+    const originalVolume = element.volume;
+    if (!originalSrc) {
+      const silentUrl = getSilentAudioUrl();
+      if (!silentUrl) return;
+      element.src = silentUrl;
+      element.load?.();
+    }
+    element.muted = true;
+    element.volume = 0;
+    try {
+      await element.play();
+      element.pause();
+    } catch (_error) {
+      // Ignore unlock failures; later explicit user gestures can retry playback.
+    } finally {
+      element.muted = originalMuted;
+      element.volume = originalVolume;
+      if (!originalSrc) {
+        element.removeAttribute("src");
+        element.load?.();
+      }
+    }
+  }
+
+  async function unlockAudioPlayback() {
+    if (audioUnlockedRef.current || audioUnlockingRef.current) return;
+    audioUnlockingRef.current = true;
+    try {
+      await Promise.all([
+        unlockAudioElement(audioRef.current),
+        unlockAudioElement(podcastAudioRef.current)
+      ]);
+      audioUnlockedRef.current = true;
+    } finally {
+      audioUnlockingRef.current = false;
+    }
+  }
+
+  async function attemptAudioPlay(audio, fallbackMessage) {
+    if (!audio) return false;
+    try {
+      await audio.play();
+      return true;
+    } catch (error) {
+      setMessage(describePlaybackError(error, audio) || fallbackMessage);
+      return false;
+    }
   }
 
   async function resolveTrackMusic(track) {
@@ -3359,7 +3452,7 @@ function App() {
       window.setTimeout(() => {
         if (audioRef.current) audioRef.current.volume = 1;
         audioRef.current?.load?.();
-        audioRef.current?.play().catch(() => setMessage("点击播放后浏览器才允许出声"));
+        void attemptAudioPlay(audioRef.current, "音频播放失败");
       }, 80);
       return true;
     };
@@ -3421,7 +3514,8 @@ function App() {
   function togglePlayback() {
     const audio = audioRef.current;
     if (!audio) return;
-    if (audio.paused) audio.play().catch(() => setMessage("点击播放后浏览器才允许出声"));
+    void unlockAudioPlayback();
+    if (audio.paused) void attemptAudioPlay(audio, "音频播放失败");
     else audio.pause();
   }
 
