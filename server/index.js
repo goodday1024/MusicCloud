@@ -3232,7 +3232,7 @@ async function resolveWpMusicUrl({ id, platform, br = "m4a" }) {
   return isPlayableMusicUrl(candidate) ? candidate : "";
 }
 
-async function resolveQQMusicApi1Url({ id, mediaId = "", songType = null }) {
+async function resolveQQMusicApi1Url({ id, mediaId = "", songType = null, preferCompatible = false }) {
   if (!qqMusicApi1BaseUrl || !id) return "";
   const state = await readQQMusicState().catch(() => ({}));
   const credential = state?.api1Credential || null;
@@ -3251,7 +3251,9 @@ async function resolveQQMusicApi1Url({ id, mediaId = "", songType = null }) {
       first?.purl && `https://isure.stream.qqmusic.qq.com/${first.purl}` ||
       payload?.url ||
       "";
-    const verified = await pickVerifiedMusicUrl(candidate, `QQMusicApi1 file_type=${fileType}`);
+    const preferred = pickCompatibleMusicUrl(candidate, { preferCompatible });
+    if (!preferred) continue;
+    const verified = await pickVerifiedMusicUrl(preferred, `QQMusicApi1 file_type=${fileType}`);
     if (verified) return verified;
   }
   return "";
@@ -3326,7 +3328,7 @@ function buildQQMusicOfficialRequest({ params, module, method, credential, encry
   };
 }
 
-async function fetchQQMusicOfficialUrl({ id, mediaId = "", encrypted = false, songType = 0 }) {
+async function fetchQQMusicOfficialUrl({ id, mediaId = "", encrypted = false, songType = 0, preferCompatible = false }) {
   const state = await readQQMusicState().catch(() => ({}));
   const credential = qqMusicCredentialFromStateForOfficial(state);
   const guid = randomQQGuid();
@@ -3369,19 +3371,21 @@ async function fetchQQMusicOfficialUrl({ id, mediaId = "", encrypted = false, so
     const info = resultPath.reduce((acc, key) => acc?.[key], payload);
     const purl = info?.purl || info?.wifiurl || "";
     const candidate = purl ? new URL(purl, "https://isure.stream.qqmusic.qq.com/").toString() : "";
-    const verified = await pickVerifiedMusicUrl(candidate, `musicdl official ${encrypted ? "EVkey" : "Vkey"} ${filename}`);
+    const preferred = pickCompatibleMusicUrl(candidate, { preferCompatible });
+    if (!preferred) continue;
+    const verified = await pickVerifiedMusicUrl(preferred, `musicdl official ${encrypted ? "EVkey" : "Vkey"} ${filename}`);
     if (verified) return verified;
   }
   return "";
 }
 
-async function resolveCharlesMusicdlOfficialQQUrl({ id, mediaId = "", songType = null }) {
-  const plain = await fetchQQMusicOfficialUrl({ id, mediaId, songType, encrypted: false }).catch((error) => {
+async function resolveCharlesMusicdlOfficialQQUrl({ id, mediaId = "", songType = null, preferCompatible = false }) {
+  const plain = await fetchQQMusicOfficialUrl({ id, mediaId, songType, encrypted: false, preferCompatible }).catch((error) => {
     console.warn("musicdl official Vkey fallback failed:", error.message);
     return "";
   });
   if (plain) return plain;
-  return fetchQQMusicOfficialUrl({ id, mediaId, songType, encrypted: true }).catch((error) => {
+  return fetchQQMusicOfficialUrl({ id, mediaId, songType, encrypted: true, preferCompatible }).catch((error) => {
     console.warn("musicdl official EVkey fallback failed:", error.message);
     return "";
   });
@@ -3460,7 +3464,7 @@ async function fetchQQMusicLegacyVkey(mid, filename, uin = "1008611", guid = "12
   return payload?.data?.items?.[0]?.vkey || "";
 }
 
-async function resolveQQMusicDownloadCompatUrl({ id, mediaId = "" }) {
+async function resolveQQMusicDownloadCompatUrl({ id, mediaId = "", preferCompatible = false }) {
   const mid = String(id || "").trim();
   if (!mid) return "";
   const file = await fetchQQMusicLegacySongFile(mid).catch((error) => {
@@ -3480,13 +3484,15 @@ async function resolveQQMusicDownloadCompatUrl({ id, mediaId = "" }) {
     });
     if (!vkey) continue;
     const candidate = `http://streamoc.music.tc.qq.com/${filename}?vkey=${encodeURIComponent(vkey)}&guid=1234567890&uin=1008611&fromtag=8`;
-    const verified = await pickVerifiedMusicUrl(candidate, `qqMusicDownload ${filename}`);
+    const preferred = pickCompatibleMusicUrl(candidate, { preferCompatible });
+    if (!preferred) continue;
+    const verified = await pickVerifiedMusicUrl(preferred, `qqMusicDownload ${filename}`);
     if (verified) return verified;
   }
   return "";
 }
 
-async function resolveMusicDlQQCompatUrl({ id }) {
+async function resolveMusicDlQQCompatUrl({ id, preferCompatible = false }) {
   const mid = String(id || "").trim();
   if (!mid) return "";
   const guid = String(Math.floor(1_000_000_000 + Math.random() * 9_000_000_000));
@@ -3505,7 +3511,9 @@ async function resolveMusicDlQQCompatUrl({ id }) {
     });
     if (!vkey) continue;
     const candidate = `http://dl.stream.qqmusic.qq.com/${filename}?vkey=${encodeURIComponent(vkey)}&guid=${guid}&uin=3051522991&fromtag=64`;
-    const verified = await pickVerifiedMusicUrl(candidate, `music-dl ${filename}`);
+    const preferred = pickCompatibleMusicUrl(candidate, { preferCompatible });
+    if (!preferred) continue;
+    const verified = await pickVerifiedMusicUrl(preferred, `music-dl ${filename}`);
     if (verified) return verified;
   }
   return "";
@@ -3559,7 +3567,7 @@ async function fetchJsonWithTimeout(url, { headers = {}, timeoutMs = 8000 } = {}
   }
 }
 
-async function resolveCharlesMusicdlQQCompatUrl({ id }) {
+async function resolveCharlesMusicdlQQCompatUrl({ id, preferCompatible = false }) {
   if (!qqMusicCharlesMusicdlFallbackEnabled) return "";
   const mid = String(id || "").trim();
   if (!mid) return "";
@@ -3570,7 +3578,7 @@ async function resolveCharlesMusicdlQQCompatUrl({ id }) {
         const url = new URL("https://api.nki.pw/API/music_open_api.php");
         url.searchParams.set("mid", mid);
         url.searchParams.set("apikey", key);
-        const candidate = pickFirstPlayableUrl(await fetchJsonWithTimeout(url).catch(() => null));
+        const candidate = pickCompatibleMusicUrl(pickFirstPlayableUrl(await fetchJsonWithTimeout(url).catch(() => null)), { preferCompatible });
         if (candidate) return candidate;
       }
       return "";
@@ -3578,7 +3586,7 @@ async function resolveCharlesMusicdlQQCompatUrl({ id }) {
     async tang() {
       const url = new URL("https://tang.api.s01s.cn/music_open_api.php");
       url.searchParams.set("mid", mid);
-      return pickFirstPlayableUrl(await fetchJsonWithTimeout(url));
+      return pickCompatibleMusicUrl(pickFirstPlayableUrl(await fetchJsonWithTimeout(url)), { preferCompatible });
     },
     async xianyuw() {
       for (const key of qqMusicThirdPartyKeys.xianyuw) {
@@ -3587,7 +3595,7 @@ async function resolveCharlesMusicdlQQCompatUrl({ id }) {
         url.searchParams.set("key", key);
         url.searchParams.set("no_url", "0");
         url.searchParams.set("br", "hires");
-        const candidate = pickFirstPlayableUrl(await fetchJsonWithTimeout(url).catch(() => null));
+        const candidate = pickCompatibleMusicUrl(pickFirstPlayableUrl(await fetchJsonWithTimeout(url).catch(() => null)), { preferCompatible });
         if (candidate) return candidate;
       }
       return "";
@@ -3596,25 +3604,25 @@ async function resolveCharlesMusicdlQQCompatUrl({ id }) {
       const url = new URL("https://api.xunhuisi.store/API/QQMusic/Song.php");
       url.searchParams.set("mid", mid);
       url.searchParams.set("type", "json");
-      return pickFirstPlayableUrl(await fetchJsonWithTimeout(url));
+      return pickCompatibleMusicUrl(pickFirstPlayableUrl(await fetchJsonWithTimeout(url)), { preferCompatible });
     },
     async lpz() {
       const url = new URL("https://lpz.chatc.vip/apiqq.php");
       url.searchParams.set("songmid", mid);
       url.searchParams.set("type", "json");
       url.searchParams.set("br", "1");
-      return pickFirstPlayableUrl(await fetchJsonWithTimeout(url));
+      return pickCompatibleMusicUrl(pickFirstPlayableUrl(await fetchJsonWithTimeout(url)), { preferCompatible });
     },
     async lxmusic() {
-      for (const quality of ["flac24bit", "hires", "flac", "320k", "128k"]) {
+      for (const quality of (preferCompatible ? ["320k", "128k", "flac24bit", "hires", "flac"] : ["flac24bit", "hires", "flac", "320k", "128k"])) {
         const url = new URL(`https://lxmusicapi.onrender.com/url/tx/${encodeURIComponent(mid)}/${quality}`);
-        const candidate = pickFirstPlayableUrl(await fetchJsonWithTimeout(url, {
+        const candidate = pickCompatibleMusicUrl(pickFirstPlayableUrl(await fetchJsonWithTimeout(url, {
           headers: {
             "Content-Type": "application/json",
             "X-Request-Key": process.env.QQMUSIC_LXMUSIC_REQUEST_KEY || "share-v3",
             "User-Agent": "lx-music-request/2.6.0"
           }
-        }).catch(() => null));
+        }).catch(() => null)), { preferCompatible });
         if (candidate && !candidate.includes("panspace.kuwo.cn")) return candidate;
       }
       return "";
@@ -3624,7 +3632,7 @@ async function resolveCharlesMusicdlQQCompatUrl({ id }) {
         const url = new URL("https://api.vkeys.cn/music/tencent/song/link");
         url.searchParams.set("mid", mid);
         url.searchParams.set("quality", String(quality));
-        const candidate = pickFirstPlayableUrl(await fetchJsonWithTimeout(url).catch(() => null));
+        const candidate = pickCompatibleMusicUrl(pickFirstPlayableUrl(await fetchJsonWithTimeout(url).catch(() => null)), { preferCompatible });
         if (candidate) return candidate;
       }
       return "";
@@ -3722,6 +3730,33 @@ function normalizeSearchResponse(payload, platform) {
 
 function isPlayableMusicUrl(url) {
   return typeof url === "string" && /^https?:\/\//i.test(url) && !url.includes("付费歌曲");
+}
+
+function audioContainerExtension(url) {
+  if (!url) return "";
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    const match = pathname.match(/\.([a-z0-9]+)$/i);
+    return match?.[1] || "";
+  } catch (_error) {
+    return "";
+  }
+}
+
+function prefersCompatiblePlayback(mode) {
+  return /^(ios-app|ios-webview|mobile-webview)$/i.test(String(mode || "").trim());
+}
+
+function isHtml5CompatibleAudioUrl(url) {
+  const ext = audioContainerExtension(url);
+  if (!ext) return true;
+  return !["flac", "mflac", "ape", "ogg", "mgg"].includes(ext);
+}
+
+function pickCompatibleMusicUrl(url, { preferCompatible = false } = {}) {
+  if (!isPlayableMusicUrl(url)) return "";
+  if (preferCompatible && !isHtml5CompatibleAudioUrl(url)) return "";
+  return url;
 }
 
 function looksLikeAudioBuffer(buffer) {
@@ -3840,9 +3875,11 @@ async function searchMusic({ keyword, platform, count = 10, page = 1 }) {
   return normalizeSearchResponse(payload, platform);
 }
 
-async function resolveMusicUrl({ id, url: directUrl, platform, mediaId = "", songType = null, keyword = "" }) {
-  if (isPlayableMusicUrl(directUrl)) {
-    const verifiedDirect = await pickVerifiedMusicUrl(directUrl, `${platform || "music"} direct url`);
+async function resolveMusicUrl({ id, url: directUrl, platform, mediaId = "", songType = null, keyword = "", compatibilityMode = "" }) {
+  const preferCompatible = prefersCompatiblePlayback(compatibilityMode);
+  const directCandidate = pickCompatibleMusicUrl(directUrl, { preferCompatible });
+  if (directCandidate) {
+    const verifiedDirect = await pickVerifiedMusicUrl(directCandidate, `${platform || "music"} direct url`);
     if (verifiedDirect) return verifiedDirect;
   }
   if (!id || platform === "demo") return "";
@@ -3852,15 +3889,16 @@ async function resolveMusicUrl({ id, url: directUrl, platform, mediaId = "", son
       console.warn("musicsquare tang qq resolve failed:", error.message);
       return "";
     });
-    if (isPlayableMusicUrl(tangDetailUrl)) return tangDetailUrl;
-    return "";
+    const preferredTang = pickCompatibleMusicUrl(tangDetailUrl, { preferCompatible });
+    if (preferredTang) return preferredTang;
   }
 
   const wpUrl = await resolveWpMusicUrl({ id, platform }).catch((error) => {
     console.warn(`wp_MusicApi resolve failed on ${platform}:`, error.message);
     return "";
   });
-  if (isPlayableMusicUrl(wpUrl)) return wpUrl;
+  const preferredWpUrl = pickCompatibleMusicUrl(wpUrl, { preferCompatible });
+  if (preferredWpUrl) return preferredWpUrl;
 
   // 网易云优先使用登录态获取完整版，避免本地 PHP 外链接口返回 45s 试听
   if (platform === "netease") {
@@ -3871,17 +3909,19 @@ async function resolveMusicUrl({ id, url: directUrl, platform, mediaId = "", son
         try {
           const v1Resp = await neteaseApi.song_url_v1?.({ id, cookie, level: "exhigh" }).catch(() => null);
           const candidate = v1Resp?.body?.data?.[0]?.url || "";
-          if (isPlayableMusicUrl(candidate)) {
-            const dur = await probeRemoteDuration(candidate).catch(() => 0);
-            if (!dur || dur >= 60) return candidate;
+          const preferred = pickCompatibleMusicUrl(candidate, { preferCompatible });
+          if (preferred) {
+            const dur = await probeRemoteDuration(preferred).catch(() => 0);
+            if (!dur || dur >= 60) return preferred;
           }
         } catch (e) {}
         try {
           const oldResp = await neteaseApi.song_url?.({ id, cookie }).catch(() => null);
           const candidate = oldResp?.body?.data?.[0]?.url || oldResp?.body?.data?.[0]?.mp3Url || "";
-          if (isPlayableMusicUrl(candidate)) {
-            const dur = await probeRemoteDuration(candidate).catch(() => 0);
-            if (!dur || dur >= 60) return candidate;
+          const preferred = pickCompatibleMusicUrl(candidate, { preferCompatible });
+          if (preferred) {
+            const dur = await probeRemoteDuration(preferred).catch(() => 0);
+            if (!dur || dur >= 60) return preferred;
           }
         } catch (e) {}
       }
@@ -3893,10 +3933,35 @@ async function resolveMusicUrl({ id, url: directUrl, platform, mediaId = "", son
       const state = await readQQMusicState();
       if (state.cookies?.length) {
         const payload = await qqMusicApiCall("song/url", { id, type: "m4a" }, state).catch(() => "");
-        const candidate = typeof payload === "string" ? payload : payload?.url || payload?.data || "";
-        if (isPlayableMusicUrl(candidate)) return candidate;
+        const candidate = pickCompatibleMusicUrl(typeof payload === "string" ? payload : payload?.url || payload?.data || "", { preferCompatible });
+        if (candidate) return candidate;
       }
     } catch (e) {}
+    const api1Url = await resolveQQMusicApi1Url({ id, mediaId, songType, preferCompatible }).catch((error) => {
+      console.warn("QQMusicApi1 resolve failed:", error.message);
+      return "";
+    });
+    if (api1Url) return api1Url;
+    const officialUrl = await resolveCharlesMusicdlOfficialQQUrl({ id, mediaId, songType, preferCompatible }).catch((error) => {
+      console.warn("QQ official resolve failed:", error.message);
+      return "";
+    });
+    if (officialUrl) return officialUrl;
+    const legacyUrl = await resolveQQMusicDownloadCompatUrl({ id, mediaId, preferCompatible }).catch((error) => {
+      console.warn("QQ legacy resolve failed:", error.message);
+      return "";
+    });
+    if (legacyUrl) return legacyUrl;
+    const compatUrl = await resolveMusicDlQQCompatUrl({ id, preferCompatible }).catch((error) => {
+      console.warn("QQ music-dl resolve failed:", error.message);
+      return "";
+    });
+    if (compatUrl) return compatUrl;
+    const thirdPartyCompatUrl = await resolveCharlesMusicdlQQCompatUrl({ id, preferCompatible }).catch((error) => {
+      console.warn("QQ third-party compat resolve failed:", error.message);
+      return "";
+    });
+    if (thirdPartyCompatUrl) return thirdPartyCompatUrl;
   }
 
   const localPayload = await runLocalMusicScript(platform, {
@@ -3906,7 +3971,7 @@ async function resolveMusicUrl({ id, url: directUrl, platform, mediaId = "", son
   if (localPayload) {
     const data = localPayload?.data;
     const url = localPayload?.song_url || localPayload?.url || data?.song_url || data?.url || data?.play_url || "";
-    return isPlayableMusicUrl(url) ? url : "";
+    return pickCompatibleMusicUrl(url, { preferCompatible });
   }
 
   if (!musicApiBaseUrl) return "";
@@ -3933,8 +3998,9 @@ async function resolveMusicUrl({ id, url: directUrl, platform, mediaId = "", son
         payload?.music_url ||
         payload?.play_url ||
         "";
-      if (isPlayableMusicUrl(resolvedUrl)) {
-        const dur = await probeRemoteDuration(resolvedUrl).catch(() => 0);
+      const preferredResolvedUrl = pickCompatibleMusicUrl(resolvedUrl, { preferCompatible });
+      if (preferredResolvedUrl) {
+        const dur = await probeRemoteDuration(preferredResolvedUrl).catch(() => 0);
         if (!dur || dur < 60) {
           // preview detected, try v1 endpoint to fetch higher-quality/full url
           const v1 = new URL(`${musicApiBaseUrl}/song/url/v1`);
@@ -3945,11 +4011,11 @@ async function resolveMusicUrl({ id, url: directUrl, platform, mediaId = "", son
           const r1 = await fetch(v1, { headers: { Cookie: "os=pc", Accept: "application/json" } }).catch(() => null);
           if (r1 && r1.ok) {
             const p1 = await r1.json().catch(async () => ({ url: await r1.text() }));
-            const alt = (Array.isArray(p1?.data) ? p1?.data[0]?.url : p1?.data) || p1?.url || p1?.song_url || p1?.music_url || "";
-            if (isPlayableMusicUrl(alt)) return alt;
+            const alt = pickCompatibleMusicUrl((Array.isArray(p1?.data) ? p1?.data[0]?.url : p1?.data) || p1?.url || p1?.song_url || p1?.music_url || "", { preferCompatible });
+            if (alt) return alt;
           }
         }
-        return resolvedUrl;
+        return preferredResolvedUrl;
       }
     }
   }
@@ -3963,7 +4029,7 @@ async function resolveMusicUrl({ id, url: directUrl, platform, mediaId = "", son
   if (!response.ok) throw new Error(`Music API resolve failed: ${response.status}`);
   const payload = await response.json().catch(async () => ({ url: await response.text() }));
   const resolvedUrl = payload?.song_url || payload?.url || payload?.data?.song_url || payload?.data?.url || payload?.data?.play_url || payload?.music_url || payload?.play_url || "";
-  return isPlayableMusicUrl(resolvedUrl) ? resolvedUrl : "";
+  return pickCompatibleMusicUrl(resolvedUrl, { preferCompatible });
 }
 
 async function resolveMusicFromSearchIndex({ keyword, sourceIndex, platform }) {

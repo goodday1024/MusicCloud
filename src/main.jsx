@@ -98,6 +98,14 @@ function buildMusicProxyUrl(rawUrl) {
     : `${REMOTE_API_BASE_URL}${proxyPath}`;
 }
 
+function currentPlaybackCompatibilityMode() {
+  if (typeof window === "undefined") return "";
+  if (window.caelumShaoDesktop?.isDesktop) return "";
+  const protocol = String(window.location.protocol || "").toLowerCase();
+  if (protocol === "capacitor:" || protocol === "ionic:") return "ios-webview";
+  return "";
+}
+
 function trackKey(track) {
   if (!track) return "";
   return String(track.libraryKey || track.id || track.podcastAudioUrl || track.musicUrl || `${track.title || ""}-${track.artist || ""}`);
@@ -3328,7 +3336,8 @@ function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         ...track,
-        keyword: track.qqSearchKey || track.musicKeyword || `${track.title || ""} ${track.artist || ""}`.trim()
+        keyword: track.qqSearchKey || track.musicKeyword || `${track.title || ""} ${track.artist || ""}`.trim(),
+        compatibilityMode: currentPlaybackCompatibilityMode()
       })
     });
     const data = await readJsonResponse(response);
