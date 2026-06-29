@@ -5472,13 +5472,16 @@ app.get("/api/music/search-all", async (req, res, next) => {
 
 app.post("/api/music/resolve", async (req, res, next) => {
   try {
+    const compatibilityMode = req.body?.compatibilityMode || "";
+    const preferCompatible = prefersCompatiblePlayback(compatibilityMode);
     let musicUrl = await resolveMusicUrl({
       id: req.body?.id,
       url: req.body?.url,
       platform: inferMusicPlatform(req.body || {}, req.body?.platform || defaultMusicPlatform),
       mediaId: req.body?.mediaId || req.body?.media_mid || "",
       songType: req.body?.songType || req.body?.song_type || null,
-      keyword: req.body?.qqSearchKey || req.body?.musicKeyword || req.body?.keyword || ""
+      keyword: req.body?.qqSearchKey || req.body?.musicKeyword || req.body?.keyword || "",
+      compatibilityMode
     });
     if (!musicUrl && req.body?.musicKeyword && req.body?.sourceIndex !== undefined) {
       const indexed = await resolveMusicFromSearchIndex({
@@ -5486,7 +5489,7 @@ app.post("/api/music/resolve", async (req, res, next) => {
         sourceIndex: Number(req.body.sourceIndex),
         platform: req.body.platform || defaultMusicPlatform
       });
-      musicUrl = indexed?.musicUrl || "";
+      musicUrl = pickCompatibleMusicUrl(indexed?.musicUrl || "", { preferCompatible });
     }
     res.json({ musicUrl });
   } catch (error) {
