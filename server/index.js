@@ -8,8 +8,8 @@ import { createRequire } from "node:module";
 import net from "node:net";
 import tls from "node:tls";
 import { nanoid } from "nanoid";
-import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createReadStream, existsSync } from "node:fs";
+import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Readable } from "node:stream";
@@ -406,14 +406,46 @@ app.get("/api/music/proxy", async (req, res, next) => {
       res.status(400).json({ error: "缺少可播放音频链接" });
       return;
     }
-    const upstream = await fetch(targetUrl, {
+    const requestedRange = String(req.headers.range || "").trim();
+    const fetchUpstream = async (forwardRange = false) => fetch(targetUrl, {
       headers: {
         ...musicDownloadHeaders(targetUrl),
-        ...(req.headers.range ? { Range: String(req.headers.range) } : {})
+        ...(forwardRange && requestedRange ? { Range: requestedRange } : {})
       }
     });
+    const shouldSkipRangeProbe = shouldTranscodeMusicProxy({ url: targetUrl });
+    let upstream = await fetchUpstream(!shouldSkipRangeProbe);
     if (!upstream.ok && upstream.status !== 206) {
       res.status(upstream.status || 502).json({ error: `音频代理失败：${upstream.status}` });
+      return;
+    }
+    const upstreamContentType = upstream.headers.get("content-type") || "";
+    if (shouldTranscodeMusicProxy({ url: targetUrl, contentType: upstreamContentType })) {
+      if (requestedRange && upstream.status === 206) {
+        upstream = await fetchUpstream(false);
+        if (!upstream.ok) {
+          res.status(upstream.status || 502).json({ error: `音频转码下载失败：${upstream.status}` });
+          return;
+        }
+      }
+      const mp3Path = await ensureTranscodedMusicProxyFile({ targetUrl, response: upstream });
+      await sendStoredAudioFile(req, res, mp3Path, {
+        contentType: "audio/mpeg",
+        cacheControl: "public, max-age=86400"
+      });
+      return;
+    }
+    if (/text\/html|application\/json|text\/plain/i.test(upstreamContentType)) {
+      const buffer = Buffer.from(await upstream.arrayBuffer());
+      if (!looksLikeAudioBuffer(buffer)) {
+        res.status(502).json({
+          error: summarizeNonAudioPayload(buffer)
+        });
+        return;
+      }
+      res.setHeader("Content-Type", "audio/mpeg");
+      res.setHeader("Content-Length", String(buffer.length));
+      res.status(200).end(buffer);
       return;
     }
     const passthroughHeaders = [
@@ -428,20 +460,6 @@ app.get("/api/music/proxy", async (req, res, next) => {
     for (const headerName of passthroughHeaders) {
       const value = upstream.headers.get(headerName);
       if (value) res.setHeader(headerName, value);
-    }
-    const upstreamContentType = upstream.headers.get("content-type") || "";
-    if (/text\/html|application\/json|text\/plain/i.test(upstreamContentType)) {
-      const buffer = Buffer.from(await upstream.arrayBuffer());
-      if (!looksLikeAudioBuffer(buffer)) {
-        res.status(502).json({
-          error: summarizeNonAudioPayload(buffer)
-        });
-        return;
-      }
-      res.setHeader("Content-Type", "audio/mpeg");
-      res.setHeader("Content-Length", String(buffer.length));
-      res.status(200).end(buffer);
-      return;
     }
     if (!res.getHeader("cache-control")) {
       res.setHeader("Cache-Control", "public, max-age=300");
@@ -3793,6 +3811,128 @@ function summarizeNonAudioPayload(buffer) {
   if (/^\s*</.test(text)) return "下载到的是 HTML 页面，可能是音乐外链防盗链或接口错误页";
   if (/^\s*[\[{]/.test(text)) return `下载到的是 JSON 错误响应：${text.slice(0, 160)}`;
   return text ? `下载到的不是音频：${text.slice(0, 160)}` : "下载到的不是音频";
+}
+
+function shouldTranscodeMusicProxy({ url, contentType = "" } = {}) {
+  const ext = audioContainerExtension(url);
+  if (["flac", "mflac", "ape", "ogg", "mgg"].includes(ext)) return true;
+  return /(?:audio|application)\/(?:x-)?(?:flac|ogg|ape)\b/i.test(String(contentType || ""));
+}
+
+function musicProxyTranscodePath(targetUrl) {
+  const cacheKey = crypto.createHash("sha1").update(String(targetUrl || "")).digest("hex").slice(0, 20);
+  return path.join(generatedDir, `music-proxy-${cacheKey}.mp3`);
+}
+
+async function probeAudioFile(filePath) {
+  const { stdout } = await execFileAsync(ffprobeBin, [
+    "-v",
+    "error",
+    "-select_streams",
+    "a:0",
+    "-show_entries",
+    "stream=codec_type:format=duration",
+    "-of",
+    "json",
+    filePath
+  ], { timeout: 15000 });
+  const info = JSON.parse(stdout || "{}");
+  const hasAudio = Array.isArray(info.streams) && info.streams.some((stream) => stream.codec_type === "audio");
+  const duration = Number.parseFloat(info.format?.duration || "0");
+  return {
+    hasAudio,
+    duration
+  };
+}
+
+async function isUsableStoredAudioFile(filePath, minBytes = 32_000) {
+  if (!existsSync(filePath)) return false;
+  try {
+    const fileInfo = await stat(filePath);
+    if (fileInfo.size < minBytes) return false;
+    const probe = await probeAudioFile(filePath);
+    return probe.hasAudio && Number.isFinite(probe.duration) && probe.duration > 0;
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function ensureTranscodedMusicProxyFile({ targetUrl, response }) {
+  const outputPath = musicProxyTranscodePath(targetUrl);
+  if (await isUsableStoredAudioFile(outputPath)) return outputPath;
+  await unlink(outputPath).catch(() => {});
+  const sourceExt = audioContainerExtension(targetUrl) || "audio";
+  const sourcePath = path.join(generatedDir, `music-proxy-src-${nanoid(8)}.${sourceExt}`);
+  try {
+    const contentType = response.headers.get("content-type") || "";
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length < 32_000) throw new Error(`音频下载过小：${buffer.length} bytes`);
+    if (/text\/html|application\/json|text\/plain/i.test(contentType) && !looksLikeAudioBuffer(buffer)) {
+      throw new Error(summarizeNonAudioPayload(buffer));
+    }
+    if (!looksLikeAudioBuffer(buffer) && !/audio\//i.test(contentType)) {
+      throw new Error(summarizeNonAudioPayload(buffer));
+    }
+    await writeFile(sourcePath, buffer);
+    await execFileAsync(ffmpegBin, [
+      "-y",
+      "-i",
+      sourcePath,
+      "-vn",
+      "-map_metadata",
+      "-1",
+      "-c:a",
+      "libmp3lame",
+      "-q:a",
+      "2",
+      outputPath
+    ], { timeout: 120000 });
+    if (!(await isUsableStoredAudioFile(outputPath))) {
+      throw new Error("音频转码后仍不是有效的 mp3");
+    }
+    return outputPath;
+  } finally {
+    await unlink(sourcePath).catch(() => {});
+  }
+}
+
+async function sendStoredAudioFile(req, res, filePath, { contentType = "audio/mpeg", cacheControl = "public, max-age=86400" } = {}) {
+  const totalSize = (await stat(filePath)).size;
+  const rangeHeader = String(req.headers.range || "").trim();
+  res.setHeader("Content-Type", contentType);
+  res.setHeader("Cache-Control", cacheControl);
+  res.setHeader("Accept-Ranges", "bytes");
+  if (!rangeHeader) {
+    res.setHeader("Content-Length", String(totalSize));
+    res.status(200);
+    createReadStream(filePath).pipe(res);
+    return;
+  }
+  const match = rangeHeader.match(/^bytes=(\d*)-(\d*)$/i);
+  if (!match) {
+    res.status(416);
+    res.setHeader("Content-Range", `bytes */${totalSize}`);
+    res.end();
+    return;
+  }
+  let start = match[1] ? Number.parseInt(match[1], 10) : 0;
+  let end = match[2] ? Number.parseInt(match[2], 10) : totalSize - 1;
+  if (match[1] === "" && match[2]) {
+    const suffixLength = Number.parseInt(match[2], 10);
+    start = Math.max(0, totalSize - suffixLength);
+    end = totalSize - 1;
+  }
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start >= totalSize || end < start) {
+    res.status(416);
+    res.setHeader("Content-Range", `bytes */${totalSize}`);
+    res.end();
+    return;
+  }
+  end = Math.min(end, totalSize - 1);
+  res.status(206);
+  res.setHeader("Content-Length", String(end - start + 1));
+  res.setHeader("Content-Range", `bytes ${start}-${end}/${totalSize}`);
+  createReadStream(filePath, { start, end }).pipe(res);
 }
 
 async function verifyRemoteMusicUrl(url, label = "music url") {
