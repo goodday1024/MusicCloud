@@ -1155,6 +1155,7 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       earthGlobe.setPointOfView?.(camera);
     };
 
+    let resizeFrame = 0;
     const resize = () => {
       const rect = host.getBoundingClientRect();
       const width = Math.max(1, rect.width);
@@ -1162,6 +1163,10 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+    };
+    const scheduleResize = () => {
+      window.cancelAnimationFrame(resizeFrame);
+      resizeFrame = window.requestAnimationFrame(resize);
     };
 
     const scheduleFullQuality = (generation) => {
@@ -1728,7 +1733,13 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
     window.addEventListener("keyup", onKeyUp);
     const onPointerLeave = () => setHover(null);
     host.addEventListener("pointerleave", onPointerLeave);
-    window.addEventListener("resize", resize);
+    const resizeObserver = typeof ResizeObserver === "function"
+      ? new ResizeObserver(() => scheduleResize())
+      : null;
+    resizeObserver?.observe(host);
+    window.addEventListener("resize", scheduleResize);
+    window.addEventListener("orientationchange", scheduleResize);
+    window.visualViewport?.addEventListener("resize", scheduleResize);
 
     return () => {
       window.cancelAnimationFrame(raf);
@@ -1744,7 +1755,11 @@ function SongSphere({ tracks = [], energy = 0, selectedKey = "", playing = false
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       host.removeEventListener("pointerleave", onPointerLeave);
-      window.removeEventListener("resize", resize);
+      window.cancelAnimationFrame(resizeFrame);
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", scheduleResize);
+      window.removeEventListener("orientationchange", scheduleResize);
+      window.visualViewport?.removeEventListener("resize", scheduleResize);
       runtimeRef.current = null;
       dustMaterial.dispose();
       trackMaterial.dispose();
