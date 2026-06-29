@@ -14,6 +14,8 @@
     "server": "node server/index.js",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
+    "cap:sync:ios": "npm run build && npx cap sync ios",
+    "cap:open:ios": "npx cap open ios",
     "prepare:electron": "rm -rf .electron-pack && mkdir -p .electron-pack && cp -R dist electron build .electron-pack/ && cp electron/package.json .electron-pack/package.json",
     "pack:mac": "npm run build && npm run prepare:electron && electron-builder --projectDir .electron-pack --mac --dir",
     "dist:mac": "npm run build && npm run prepare:electron && electron-builder --projectDir .electron-pack --mac"
@@ -47,6 +49,8 @@
     }
   },
   "dependencies": {
+    "@capacitor/core": "^8.4.1",
+    "@capacitor/ios": "^8.4.1",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@ffprobe-installer/ffprobe": "^2.1.2",
     "@vercel/blob": "^2.4.1",
@@ -69,6 +73,7 @@
     "vite": "^6.3.5"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.4.1",
     "electron": "^41.7.1",
     "electron-builder": "^26.15.3",
     "wait-on": "^9.0.10"
