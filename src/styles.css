@@ -2693,6 +2693,18 @@ button.copy-btn {
     min-width: 0;
   }
 
+  .search-input,
+  .select-shell,
+  .select-shell select,
+  .phone-login input,
+  .qq-cookie-login textarea,
+  .account-form input,
+  .invite-form input,
+  .admin-form input,
+  .admin-password-form input {
+    font-size: 16px;
+  }
+
   .top-lyric {
     top: var(--lyric-y, 16%);
     left: var(--lyric-x, 50%);
