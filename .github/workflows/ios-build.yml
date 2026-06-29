@@ -61,6 +61,68 @@ jobs:
           path: ${{ runner.temp }}/DerivedData-sim/Build/Products/Release-iphonesimulator/App.app
           if-no-files-found: error
 
+  ios-unsigned-ipa:
+    name: 导出未签名 IPA
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Sync web assets to iOS
+        env:
+          CI: "true"
+        run: npm run cap:sync:ios
+
+      - name: Build unsigned device app
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ios/App/App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-unsigned" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned ipa
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/DerivedData-unsigned/Build/Products/Release-iphoneos/App.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Unsigned device app not found: $APP_PATH" >&2
+            exit 1
+          fi
+
+          PAYLOAD_DIR="$RUNNER_TEMP/unsigned-ipa/Payload"
+          mkdir -p "$PAYLOAD_DIR"
+          cp -R "$APP_PATH" "$PAYLOAD_DIR/App.app"
+
+          mkdir -p "$RUNNER_TEMP/artifacts"
+          ditto -c -k --sequesterRsrc --keepParent "$PAYLOAD_DIR" "$RUNNER_TEMP/artifacts/App-unsigned.ipa"
+
+      - name: Upload unsigned ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-ipa
+          path: ${{ runner.temp }}/artifacts/App-unsigned.ipa
+          if-no-files-found: error
+
   ios-signed-ipa:
     name: 导出签名 IPA
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.signed_build }}

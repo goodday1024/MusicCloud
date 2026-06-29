@@ -10,6 +10,11 @@
   - 任何时候都能跑。
   - 产物是 `App.app`，用于验证 iOS 工程能否正常编译。
 
+- `未签名的设备 IPA`
+  - 任何时候都能跑，不需要苹果证书。
+  - 产物是 `App-unsigned.ipa`，适合你后续自己再签名。
+  - 常见后续用法是配合 `Sideloadly`、`AltStore`、`SideStore` 或其他重签名工具。
+
 - `带签名的 IPA`
   - 需要你在 GitHub 仓库里提前配置苹果签名 secrets。
   - 产物是可分发的 `.ipa`。
@@ -75,9 +80,17 @@ base64 -i App.mobileprovision
 
 - `signed_build = false`
   - 在 workflow artifacts 里下载 `ios-simulator-app`
+  - 同时还能下载 `ios-unsigned-ipa`
 
 - `signed_build = true`
   - 在 workflow artifacts 里下载 `ios-signed-ipa`
+  - 同时还能下载 `ios-unsigned-ipa`
+
+## 未签名 IPA 的限制
+
+- 这个 `ipa` 只是把 `iphoneos` 产物打包成标准 `Payload/App.app` 结构，本身不能直接安装
+- 你后续仍需要自己做一次签名或重签名，才能装到非越狱 iPhone
+- 如果你使用 `AltStore`、`Sideloadly` 一类工具，通常可以直接拿这个未签名 `ipa` 做后续签名安装
 
 ## 当前项目的注意点
 
