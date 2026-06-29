@@ -4,6 +4,6 @@
   "webDir": "dist",
   "bundledWebRuntime": false,
   "packageClassList": [
-    "App.NativeAudioPlayerPlugin"
+    "NativeAudioPlayerPlugin"
   ]
 }
