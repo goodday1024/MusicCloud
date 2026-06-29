@@ -429,6 +429,20 @@ app.get("/api/music/proxy", async (req, res, next) => {
       const value = upstream.headers.get(headerName);
       if (value) res.setHeader(headerName, value);
     }
+    const upstreamContentType = upstream.headers.get("content-type") || "";
+    if (/text\/html|application\/json|text\/plain/i.test(upstreamContentType)) {
+      const buffer = Buffer.from(await upstream.arrayBuffer());
+      if (!looksLikeAudioBuffer(buffer)) {
+        res.status(502).json({
+          error: summarizeNonAudioPayload(buffer)
+        });
+        return;
+      }
+      res.setHeader("Content-Type", "audio/mpeg");
+      res.setHeader("Content-Length", String(buffer.length));
+      res.status(200).end(buffer);
+      return;
+    }
     if (!res.getHeader("cache-control")) {
       res.setHeader("Cache-Control", "public, max-age=300");
     }
@@ -3819,6 +3833,12 @@ async function pickVerifiedMusicUrl(url, label) {
   return (await verifyRemoteMusicUrl(url, label)) ? url : "";
 }
 
+async function pickResolvedMusicUrl(url, label, { preferCompatible = false } = {}) {
+  const preferred = pickCompatibleMusicUrl(url, { preferCompatible });
+  if (!preferred) return "";
+  return pickVerifiedMusicUrl(preferred, label);
+}
+
 async function searchMusic({ keyword, platform, count = 10, page = 1 }) {
   if (platform === "qq") {
     const api1Items = await searchQQMusicApi1({ keyword, count, page }).catch((error) => {
@@ -3889,16 +3909,16 @@ async function resolveMusicUrl({ id, url: directUrl, platform, mediaId = "", son
       console.warn("musicsquare tang qq resolve failed:", error.message);
       return "";
     });
-    const preferredTang = pickCompatibleMusicUrl(tangDetailUrl, { preferCompatible });
-    if (preferredTang) return preferredTang;
+    const verifiedTangUrl = await pickResolvedMusicUrl(tangDetailUrl, "QQ tang detail url", { preferCompatible });
+    if (verifiedTangUrl) return verifiedTangUrl;
   }
 
   const wpUrl = await resolveWpMusicUrl({ id, platform }).catch((error) => {
     console.warn(`wp_MusicApi resolve failed on ${platform}:`, error.message);
     return "";
   });
-  const preferredWpUrl = pickCompatibleMusicUrl(wpUrl, { preferCompatible });
-  if (preferredWpUrl) return preferredWpUrl;
+  const verifiedWpUrl = await pickResolvedMusicUrl(wpUrl, `${platform || "music"} wp music url`, { preferCompatible });
+  if (verifiedWpUrl) return verifiedWpUrl;
 
   // 网易云优先使用登录态获取完整版，避免本地 PHP 外链接口返回 45s 试听
   if (platform === "netease") {
@@ -3933,8 +3953,8 @@ async function resolveMusicUrl({ id, url: directUrl, platform, mediaId = "", son
       const state = await readQQMusicState();
       if (state.cookies?.length) {
         const payload = await qqMusicApiCall("song/url", { id, type: "m4a" }, state).catch(() => "");
-        const candidate = pickCompatibleMusicUrl(typeof payload === "string" ? payload : payload?.url || payload?.data || "", { preferCompatible });
-        if (candidate) return candidate;
+        const verifiedQqStateUrl = await pickResolvedMusicUrl(typeof payload === "string" ? payload : payload?.url || payload?.data || "", "QQ state music url", { preferCompatible });
+        if (verifiedQqStateUrl) return verifiedQqStateUrl;
       }
     } catch (e) {}
     const api1Url = await resolveQQMusicApi1Url({ id, mediaId, songType, preferCompatible }).catch((error) => {
@@ -3971,7 +3991,7 @@ async function resolveMusicUrl({ id, url: directUrl, platform, mediaId = "", son
   if (localPayload) {
     const data = localPayload?.data;
     const url = localPayload?.song_url || localPayload?.url || data?.song_url || data?.url || data?.play_url || "";
-    return pickCompatibleMusicUrl(url, { preferCompatible });
+    return pickResolvedMusicUrl(url, `${platform || "music"} local payload url`, { preferCompatible });
   }
 
   if (!musicApiBaseUrl) return "";
@@ -4011,11 +4031,12 @@ async function resolveMusicUrl({ id, url: directUrl, platform, mediaId = "", son
           const r1 = await fetch(v1, { headers: { Cookie: "os=pc", Accept: "application/json" } }).catch(() => null);
           if (r1 && r1.ok) {
             const p1 = await r1.json().catch(async () => ({ url: await r1.text() }));
-            const alt = pickCompatibleMusicUrl((Array.isArray(p1?.data) ? p1?.data[0]?.url : p1?.data) || p1?.url || p1?.song_url || p1?.music_url || "", { preferCompatible });
+            const alt = await pickResolvedMusicUrl((Array.isArray(p1?.data) ? p1?.data[0]?.url : p1?.data) || p1?.url || p1?.song_url || p1?.music_url || "", "netease v1 fallback url", { preferCompatible });
             if (alt) return alt;
           }
         }
-        return preferredResolvedUrl;
+        const verifiedResolvedUrl = await pickResolvedMusicUrl(preferredResolvedUrl, "netease resolved url", { preferCompatible });
+        if (verifiedResolvedUrl) return verifiedResolvedUrl;
       }
     }
   }
@@ -4029,7 +4050,7 @@ async function resolveMusicUrl({ id, url: directUrl, platform, mediaId = "", son
   if (!response.ok) throw new Error(`Music API resolve failed: ${response.status}`);
   const payload = await response.json().catch(async () => ({ url: await response.text() }));
   const resolvedUrl = payload?.song_url || payload?.url || payload?.data?.song_url || payload?.data?.url || payload?.data?.play_url || payload?.music_url || payload?.play_url || "";
-  return pickCompatibleMusicUrl(resolvedUrl, { preferCompatible });
+  return pickResolvedMusicUrl(resolvedUrl, `${platform || "music"} endpoint resolved url`, { preferCompatible });
 }
 
 async function resolveMusicFromSearchIndex({ keyword, sourceIndex, platform }) {
