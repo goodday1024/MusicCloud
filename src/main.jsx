@@ -133,8 +133,7 @@ function isNativeAudioPlayerAvailable() {
 }
 
 function shouldUseNativeMusicPlayback(url) {
-  if (!isNativeAudioPlayerAvailable()) return false;
-  return ["flac", "mflac"].includes(audioContainerExtension(url));
+  return false;
 }
 
 function trackKey(track) {
@@ -3667,8 +3666,8 @@ function App() {
     setMessage(`正在准备播放 ${index + 1}/${queue.length || 1}`);
 
     const playSourceNow = async (nextSource, nextMessage = "") => {
-      const useNativePlayback = shouldUseNativeMusicPlayback(nextSource);
-      const playableSource = buildMusicProxyUrl(nextSource, { native: useNativePlayback });
+      const useNativePlayback = false;
+      const playableSource = buildMusicProxyUrl(nextSource, { native: false });
       if (token !== playTokenRef.current || !playableSource) return false;
       nativeFallbackRef.current = {
         token,
@@ -3689,25 +3688,6 @@ function App() {
       setAudioTime(0);
       setAudioDuration(0);
       setIsPlaying(false);
-      if (useNativePlayback) {
-        const audio = audioRef.current;
-        audio?.pause();
-        audio?.removeAttribute("src");
-        audio?.load?.();
-        try {
-          await NativeAudioPlayer.play({
-            url: playableSource,
-            title: track.title || "",
-            artist: track.artist || ""
-          });
-        } catch (error) {
-          const fallbackStarted = await fallbackCurrentTrackToCompatiblePlayback("原生 FLAC 启动失败，已自动回退兼容播放");
-          if (fallbackStarted) return true;
-          throw error;
-        }
-        await setMusicPlaybackVolume(1);
-        return true;
-      }
       await stopNativePlayback();
       await new Promise((resolve) => window.setTimeout(resolve, 80));
       await setMusicPlaybackVolume(1);
