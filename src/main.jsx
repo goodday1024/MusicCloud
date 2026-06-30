@@ -123,8 +123,17 @@ function isIosNativeWebView() {
   return currentPlaybackCompatibilityMode() === "ios-webview" && Capacitor.getPlatform?.() === "ios";
 }
 
-function shouldUseNativeMusicPlayback(url) {
+function isNativeAudioPlayerAvailable() {
   if (!isIosNativeWebView()) return false;
+  try {
+    return Boolean(Capacitor.isPluginAvailable?.("NativeAudioPlayer"));
+  } catch (_error) {
+    return false;
+  }
+}
+
+function shouldUseNativeMusicPlayback(url) {
+  if (!isNativeAudioPlayerAvailable()) return false;
   return ["flac", "mflac"].includes(audioContainerExtension(url));
 }
 
@@ -2019,6 +2028,11 @@ function App() {
   const audioUnlockedRef = useRef(false);
   const audioUnlockingRef = useRef(false);
   const nativePlaybackActiveRef = useRef(false);
+  const nativeFallbackRef = useRef({
+    token: 0,
+    source: "",
+    attempted: false
+  });
   const nativePlaybackStateRef = useRef({
     currentTime: 0,
     duration: 0,
@@ -2074,6 +2088,35 @@ function App() {
     audio.currentTime = targetTime;
     setAudioTime(audio.currentTime || 0);
     return audio.currentTime || 0;
+  }
+
+  async function fallbackCurrentTrackToCompatiblePlayback(reason = "") {
+    const fallbackState = nativeFallbackRef.current;
+    if (fallbackState.token !== playTokenRef.current || fallbackState.attempted) return false;
+    const track = currentTrackRef.current;
+    if (!track) return false;
+    fallbackState.attempted = true;
+    const originalSource = fallbackState.source || track.musicUrl || track.url || await resolveTrackMusic(track);
+    const playableSource = buildMusicProxyUrl(originalSource, { native: false });
+    if (!playableSource) return false;
+    nativePlaybackActiveRef.current = false;
+    setNativePlaybackActive(false);
+    nativePlaybackStateRef.current = {
+      ...nativePlaybackStateRef.current,
+      currentTime: 0,
+      duration: 0,
+      playing: false
+    };
+    await stopNativePlayback();
+    setPlayerSource(playableSource);
+    setAudioTime(0);
+    setAudioDuration(0);
+    setIsPlaying(false);
+    setMessage(reason || "原生播放失败，已回退兼容播放");
+    await new Promise((resolve) => window.setTimeout(resolve, 80));
+    await setMusicPlaybackVolume(1);
+    audioRef.current?.load?.();
+    return attemptAudioPlay(audioRef.current, "兼容播放失败");
   }
 
   const isNeteaseLoggedIn = Boolean(neteaseState?.loggedIn && (neteaseState?.uid || neteaseState?.profile?.userId || neteaseState?.profile?.nickname || neteaseState?.cookies?.length));
@@ -3276,7 +3319,7 @@ function App() {
   }, [isLoggedIn, playerSource, singleLoop]);
 
   useEffect(() => {
-    if (!isIosNativeWebView()) return undefined;
+    if (!isNativeAudioPlayerAvailable()) return undefined;
     let released = false;
     let listenerHandle = null;
     NativeAudioPlayer.addListener("stateChange", (payload) => {
@@ -3294,6 +3337,9 @@ function App() {
       if (payload?.error) {
         setMessage(String(payload.error));
         setIsPlaying(false);
+        if (nativePlaybackActiveRef.current) {
+          void fallbackCurrentTrackToCompatiblePlayback("原生 FLAC 无法打开，已自动回退兼容播放");
+        }
       }
       if (nativePlaybackActiveRef.current && (typeof payload?.playing === "boolean" || Number.isFinite(Number(payload?.currentTime)))) {
         void publishTogetherPlaybackState({
@@ -3310,6 +3356,9 @@ function App() {
       listenerHandle = handle;
     }).catch((error) => {
       console.warn("native audio listener unavailable:", error?.message || error);
+      if (nativePlaybackActiveRef.current) {
+        void fallbackCurrentTrackToCompatiblePlayback("原生播放插件不可用，已自动回退兼容播放");
+      }
     });
     return () => {
       released = true;
@@ -3601,6 +3650,11 @@ function App() {
     const track = queue[index];
     if (!track) return;
     const token = ++playTokenRef.current;
+    nativeFallbackRef.current = {
+      token,
+      source: "",
+      attempted: false
+    };
     stopPodcastOverlay();
     currentTrackRef.current = track;
     queueIndexRef.current = index;
@@ -3616,6 +3670,11 @@ function App() {
       const useNativePlayback = shouldUseNativeMusicPlayback(nextSource);
       const playableSource = buildMusicProxyUrl(nextSource, { native: useNativePlayback });
       if (token !== playTokenRef.current || !playableSource) return false;
+      nativeFallbackRef.current = {
+        token,
+        source: nextSource,
+        attempted: false
+      };
       nativePlaybackActiveRef.current = useNativePlayback;
       setNativePlaybackActive(useNativePlayback);
       nativePlaybackStateRef.current = {
@@ -3635,11 +3694,17 @@ function App() {
         audio?.pause();
         audio?.removeAttribute("src");
         audio?.load?.();
-        await NativeAudioPlayer.play({
-          url: playableSource,
-          title: track.title || "",
-          artist: track.artist || ""
-        });
+        try {
+          await NativeAudioPlayer.play({
+            url: playableSource,
+            title: track.title || "",
+            artist: track.artist || ""
+          });
+        } catch (error) {
+          const fallbackStarted = await fallbackCurrentTrackToCompatiblePlayback("原生 FLAC 启动失败，已自动回退兼容播放");
+          if (fallbackStarted) return true;
+          throw error;
+        }
         await setMusicPlaybackVolume(1);
         return true;
       }
@@ -3655,6 +3720,7 @@ function App() {
     try {
       const originalUrl = await resolveTrackMusic(track);
       if (!originalUrl) throw new Error("原曲解析失败：没有可播放链接");
+      currentTrackRef.current = { ...track, musicUrl: originalUrl };
       const playMessage = podcastEnabledRef.current
         ? `音乐已播放 ${index + 1}/${queue.length || 1}，正在后台生成播客`
         : `音乐已播放 ${index + 1}/${queue.length || 1}`;
