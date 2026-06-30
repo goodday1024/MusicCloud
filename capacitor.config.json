@@ -2,8 +2,5 @@
   "appId": "fun.zihang.caelumshao",
   "appName": "云韶 CaelumShao",
   "webDir": "dist",
-  "bundledWebRuntime": false,
-  "packageClassList": [
-    "NativeAudioPlayerPlugin"
-  ]
+  "bundledWebRuntime": false
 }
